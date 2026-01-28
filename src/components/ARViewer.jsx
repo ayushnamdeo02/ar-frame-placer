@@ -14,8 +14,6 @@ import {
   Grid,
   RotateCcw,
   RefreshCw,
-  ZoomIn,
-  ZoomOut,
   Move,
   RotateCw,
   Hand,
@@ -438,14 +436,22 @@ export default function CustomARViewer({ onClose }) {
   }, [stopCamera, initCamera]);
 
   useEffect(() => {
+    // Copy ref values to variables for cleanup
+    const startTime = sessionStartTime.current;
+    const screenshotCountValue = screenshotCount.current;
+    const transformCountValue = transformCount.current;
+
     const timer = setTimeout(() => initCamera(), 500);
+    
     return () => {
       clearTimeout(timer);
       stopCamera();
+      
+      // Use copied variables in cleanup
       analytics.trackARSessionEnded({
-        duration: Date.now() - sessionStartTime.current,
-        screenshots: screenshotCount.current,
-        transforms: transformCount.current,
+        duration: Date.now() - startTime,
+        screenshots: screenshotCountValue,
+        transforms: transformCountValue,
       });
     };
   }, [initCamera, stopCamera]);

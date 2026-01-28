@@ -1656,6 +1656,15 @@ a:hover {
   border: none;
 }
 
+.animate-pulse {
+  animation: pulse-icon 2s ease-in-out infinite;
+}
+
+@keyframes pulse-icon {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .gesture-tutorial {
