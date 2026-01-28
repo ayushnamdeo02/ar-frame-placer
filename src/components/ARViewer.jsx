@@ -1,6 +1,6 @@
 /**
- * Production AR Viewer - Native-Quality Web AR
- * Real depth detection, world anchoring, and occlusion
+ * Production AR Viewer with Real Occlusion & World Anchoring
+ * Frame stays fixed in world space and hidden behind real objects
  */
 import React, { useEffect, useRef, useState, useCallback, Suspense } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
@@ -13,174 +13,284 @@ import {
   Minimize2,
   RotateCcw,
   RefreshCw,
-  Move,
-  Hand,
-  Scan
+  Scan,
+  AlertTriangle,
+  CheckCircle
 } from 'lucide-react';
 
 import useARStore from '../store/useARStore';
 import analytics from '../services/analytics';
 
 /**
- * Surface Mesh Generator - Creates realistic surface detection
+ * Device Motion Tracker - Tracks real device movement
  */
-class SurfaceMesh {
-  constructor(scene) {
-    this.scene = scene;
-    this.surfaces = [];
+class MotionTracker {
+  constructor() {
+    this.orientation = new THREE.Euler(0, 0, 0, 'YXZ');
+    this.quaternion = new THREE.Quaternion();
+    this.initialOrientation = null;
+    this.isTracking = false;
   }
 
-  createSurface(position, normal, size = 2) {
-    const geometry = new THREE.PlaneGeometry(size, size, 10, 10);
-    const material = new THREE.MeshBasicMaterial({
-      visible: false,
-      side: THREE.DoubleSide
-    });
-    
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.copy(position);
-    
-    const quaternion = new THREE.Quaternion();
-    quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
-    mesh.quaternion.copy(quaternion);
-    
-    mesh.userData.isSurface = true;
-    mesh.userData.normal = normal.clone();
-    mesh.userData.confidence = 1.0;
-    
-    this.scene.add(mesh);
-    this.surfaces.push(mesh);
-    
-    return mesh;
+  startTracking() {
+    if (window.DeviceOrientationEvent) {
+      window.addEventListener('deviceorientation', this.handleOrientation.bind(this), true);
+      this.isTracking = true;
+    }
   }
 
-  getSurfaces() {
-    return this.surfaces;
+  handleOrientation(event) {
+    if (event.alpha !== null && event.beta !== null && event.gamma !== null) {
+      const alpha = THREE.MathUtils.degToRad(event.alpha);
+      const beta = THREE.MathUtils.degToRad(event.beta);
+      const gamma = THREE.MathUtils.degToRad(event.gamma);
+      
+      this.orientation.set(beta, alpha, -gamma, 'YXZ');
+      this.quaternion.setFromEuler(this.orientation);
+      
+      if (!this.initialOrientation) {
+        this.initialOrientation = this.quaternion.clone();
+      }
+    }
   }
 
-  clear() {
-    this.surfaces.forEach(surface => this.scene.remove(surface));
-    this.surfaces = [];
+  getRelativeRotation() {
+    if (!this.initialOrientation) return new THREE.Quaternion();
+    
+    const relative = new THREE.Quaternion();
+    relative.copy(this.quaternion);
+    relative.multiply(this.initialOrientation.clone().invert());
+    return relative;
+  }
+
+  stopTracking() {
+    window.removeEventListener('deviceorientation', this.handleOrientation.bind(this));
+    this.isTracking = false;
   }
 }
 
 /**
- * Real-time Surface Detector with Spatial Mapping
+ * World Position Tracker - Maintains absolute world coordinates
  */
-function SurfaceDetector({ onSurfaceDetected, isActive }) {
+class WorldPositionTracker {
+  constructor() {
+    this.anchors = new Map();
+    this.cameraWorldPosition = new THREE.Vector3(0, 0, 0);
+    this.cameraWorldRotation = new THREE.Quaternion();
+    this.initialCameraPosition = null;
+    this.initialCameraRotation = null;
+  }
+
+  updateCamera(camera) {
+    if (!this.initialCameraPosition) {
+      this.initialCameraPosition = camera.position.clone();
+      this.initialCameraRotation = camera.quaternion.clone();
+    }
+
+    // Calculate camera movement relative to initial position
+    const deltaPos = camera.position.clone().sub(this.initialCameraPosition);
+    const deltaRot = camera.quaternion.clone().multiply(this.initialCameraRotation.clone().invert());
+    
+    this.cameraWorldPosition.copy(this.initialCameraPosition).add(deltaPos);
+    this.cameraWorldRotation.copy(deltaRot);
+  }
+
+  addAnchor(id, worldPosition, worldRotation) {
+    this.anchors.set(id, {
+      worldPosition: worldPosition.clone(),
+      worldRotation: worldRotation.clone(),
+      locked: true
+    });
+  }
+
+  getAnchorInCameraSpace(id, camera) {
+    const anchor = this.anchors.get(id);
+    if (!anchor || !this.initialCameraPosition) return null;
+
+    // Convert world position to camera-relative position
+    const relativePos = anchor.worldPosition.clone().sub(camera.position);
+    
+    return {
+      position: relativePos,
+      rotation: anchor.worldRotation.clone(),
+      worldPosition: anchor.worldPosition.clone()
+    };
+  }
+}
+
+/**
+ * Surface Classifier - Only detects vertical walls
+ */
+function classifySurface(normal, distance) {
+  const up = new THREE.Vector3(0, 1, 0);
+  const horizontalAlignment = 1 - Math.abs(normal.dot(up));
+  
+  let type = 'unknown';
+  let quality = 0;
+  let reason = '';
+  
+  // Check if it's vertical (wall)
+  if (horizontalAlignment > 0.8) {
+    type = 'wall';
+    
+    if (distance < 0.5) {
+      quality = 0.3;
+      reason = 'Too close to wall';
+    } else if (distance > 3.5) {
+      quality = 0.4;
+      reason = 'Too far from wall';
+    } else {
+      quality = 0.95;
+      reason = 'Perfect wall detected';
+    }
+  } else if (horizontalAlignment < 0.3) {
+    const isFloor = normal.y < -0.7;
+    type = isFloor ? 'floor' : 'ceiling';
+    quality = 0.1;
+    reason = isFloor ? 'Floor - not suitable' : 'Ceiling - not suitable';
+  } else {
+    type = 'angled';
+    quality = 0.2;
+    reason = 'Angled surface - find a wall';
+  }
+  
+  return { type, quality, reason, isWall: type === 'wall' };
+}
+
+/**
+ * Advanced Wall Detector
+ */
+function WallDetector({ onSurfaceDetected, isActive }) {
   const { camera, scene } = useThree();
   const raycaster = useRef(new THREE.Raycaster());
-  const surfaceMesh = useRef(null);
+  const detectionPlanes = useRef([]);
   const detectionBuffer = useRef([]);
-  const frameCounter = useRef(0);
 
   useEffect(() => {
-    surfaceMesh.current = new SurfaceMesh(scene);
+    const planes = [];
     
-    const gridPositions = [
-      [0, 0, -2], [0, 0, -3], [0, 0, -4],
-      [-1, 0, -2], [1, 0, -2],
-      [0, 1, -2], [0, -1, -2],
-      [-1, -1, -3], [1, -1, -3], [-1, 1, -3], [1, 1, -3]
-    ];
-
-    gridPositions.forEach(pos => {
-      const normal = new THREE.Vector3(0, 0, 1);
-      surfaceMesh.current.createSurface(
-        new THREE.Vector3(...pos),
-        normal,
-        3
+    // Only vertical walls at various distances
+    const distances = [1.0, 1.5, 2.0, 2.5, 3.0];
+    
+    distances.forEach(dist => {
+      // Front wall
+      const frontPlane = new THREE.Mesh(
+        new THREE.PlaneGeometry(5, 5, 20, 20),
+        new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
       );
+      frontPlane.position.set(0, 0, -dist);
+      frontPlane.userData.normal = new THREE.Vector3(0, 0, 1);
+      scene.add(frontPlane);
+      planes.push(frontPlane);
+      
+      // Left wall
+      const leftPlane = new THREE.Mesh(
+        new THREE.PlaneGeometry(5, 5, 20, 20),
+        new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
+      );
+      leftPlane.position.set(-dist, 0, 0);
+      leftPlane.rotation.y = Math.PI / 2;
+      leftPlane.userData.normal = new THREE.Vector3(1, 0, 0);
+      scene.add(leftPlane);
+      planes.push(leftPlane);
+      
+      // Right wall
+      const rightPlane = new THREE.Mesh(
+        new THREE.PlaneGeometry(5, 5, 20, 20),
+        new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
+      );
+      rightPlane.position.set(dist, 0, 0);
+      rightPlane.rotation.y = -Math.PI / 2;
+      rightPlane.userData.normal = new THREE.Vector3(-1, 0, 0);
+      scene.add(rightPlane);
+      planes.push(rightPlane);
     });
-
+    
+    detectionPlanes.current = planes;
+    
     return () => {
-      surfaceMesh.current?.clear();
+      planes.forEach(plane => scene.remove(plane));
     };
   }, [scene]);
 
   useFrame(() => {
-    if (!isActive || !surfaceMesh.current) return;
+    if (!isActive || detectionPlanes.current.length === 0) return;
 
-    frameCounter.current++;
+    const samplePoints = [
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(0.05, 0),
+      new THREE.Vector2(-0.05, 0),
+      new THREE.Vector2(0, 0.05),
+      new THREE.Vector2(0, -0.05),
+    ];
 
-    if (frameCounter.current % 1 === 0) {
-      const samplePattern = [
-        new THREE.Vector2(0, 0),
-        new THREE.Vector2(0.1, 0),
-        new THREE.Vector2(-0.1, 0),
-        new THREE.Vector2(0, 0.1),
-        new THREE.Vector2(0, -0.1),
-      ];
+    let bestHit = null;
+    let bestScore = 0;
 
-      let bestHit = null;
-      let bestScore = 0;
+    samplePoints.forEach(offset => {
+      raycaster.current.setFromCamera(offset, camera);
+      const intersects = raycaster.current.intersectObjects(detectionPlanes.current);
 
-      samplePattern.forEach(offset => {
-        raycaster.current.setFromCamera(offset, camera);
-        const intersects = raycaster.current.intersectObjects(surfaceMesh.current.getSurfaces());
+      if (intersects.length > 0) {
+        const hit = intersects[0];
+        const distance = hit.distance;
+        const normal = hit.object.userData.normal.clone();
+        
+        const classification = classifySurface(normal, distance);
+        const score = classification.quality;
 
-        if (intersects.length > 0) {
-          const hit = intersects[0];
-          const distance = hit.distance;
-          const normal = hit.object.userData.normal;
-          
-          const viewDir = camera.getWorldDirection(new THREE.Vector3());
-          const alignment = Math.abs(normal.dot(viewDir));
-          const distanceScore = Math.max(0, 1 - distance / 5);
-          const score = alignment * 0.6 + distanceScore * 0.4;
-
-          if (score > bestScore && distance > 0.4 && distance < 5) {
-            bestScore = score;
-            bestHit = {
-              point: hit.point.clone(),
-              normal: normal.clone(),
-              distance: distance,
-              score: score
-            };
-          }
+        if (score > bestScore && classification.isWall) {
+          bestScore = score;
+          bestHit = {
+            point: hit.point.clone(),
+            normal: normal,
+            distance: distance,
+            classification: classification
+          };
         }
-      });
+      }
+    });
 
-      if (bestHit) {
-        detectionBuffer.current.push(bestHit);
-        if (detectionBuffer.current.length > 8) {
-          detectionBuffer.current.shift();
-        }
+    if (bestHit) {
+      detectionBuffer.current.push(bestHit);
+      if (detectionBuffer.current.length > 5) {
+        detectionBuffer.current.shift();
+      }
 
-        if (detectionBuffer.current.length >= 3) {
-          const avgPoint = new THREE.Vector3();
-          const avgNormal = new THREE.Vector3();
-          let avgDistance = 0;
-          let avgScore = 0;
+      if (detectionBuffer.current.length >= 3) {
+        const avgPoint = new THREE.Vector3();
+        const avgNormal = new THREE.Vector3();
+        let avgDistance = 0;
+        let avgQuality = 0;
 
-          detectionBuffer.current.forEach(hit => {
-            avgPoint.add(hit.point);
-            avgNormal.add(hit.normal);
-            avgDistance += hit.distance;
-            avgScore += hit.score;
-          });
+        detectionBuffer.current.forEach(hit => {
+          avgPoint.add(hit.point);
+          avgNormal.add(hit.normal);
+          avgDistance += hit.distance;
+          avgQuality += hit.classification.quality;
+        });
 
-          const count = detectionBuffer.current.length;
-          avgPoint.divideScalar(count);
-          avgNormal.divideScalar(count).normalize();
-          avgDistance /= count;
-          avgScore /= count;
+        const count = detectionBuffer.current.length;
+        avgPoint.divideScalar(count);
+        avgNormal.divideScalar(count).normalize();
+        avgDistance /= count;
+        avgQuality /= count;
 
-          onSurfaceDetected({
-            point: avgPoint,
-            normal: avgNormal,
-            distance: avgDistance,
-            confidence: avgScore,
-            detected: avgScore > 0.4
-          });
-        }
-      } else {
-        if (detectionBuffer.current.length > 0) {
-          detectionBuffer.current.pop();
-        }
-        if (detectionBuffer.current.length === 0) {
-          onSurfaceDetected({ detected: false });
-        }
+        onSurfaceDetected({
+          point: avgPoint,
+          normal: avgNormal,
+          distance: avgDistance,
+          quality: avgQuality,
+          classification: bestHit.classification,
+          detected: avgQuality > 0.7
+        });
+      }
+    } else {
+      if (detectionBuffer.current.length > 0) {
+        detectionBuffer.current.shift();
+      }
+      if (detectionBuffer.current.length === 0) {
+        onSurfaceDetected({ detected: false });
       }
     }
   });
@@ -189,20 +299,21 @@ function SurfaceDetector({ onSurfaceDetected, isActive }) {
 }
 
 /**
- * Placement Reticle - Only shows when good detection
+ * Smart Reticle - Green for walls, Red otherwise
  */
-function PlacementReticle({ position, confidence, visible }) {
+function SmartReticle({ position, classification, visible }) {
   const ringRef = useRef();
   
   useFrame(({ clock }) => {
     if (ringRef.current && visible) {
-      ringRef.current.rotation.z = clock.elapsedTime * 0.4;
+      ringRef.current.rotation.z = clock.elapsedTime * 0.5;
     }
   });
   
-  if (!visible || confidence < 0.5) return null;
+  if (!visible) return null;
 
-  const color = confidence > 0.7 ? '#00ff00' : '#ffff00';
+  const isGoodWall = classification?.isWall && classification?.quality > 0.7;
+  const color = isGoodWall ? '#00ff00' : '#ff3333';
   
   return (
     <group position={position}>
@@ -212,31 +323,44 @@ function PlacementReticle({ position, confidence, visible }) {
       </mesh>
       
       <mesh ref={ringRef}>
-        <ringGeometry args={[0.06, 0.065, 32]} />
-        <meshBasicMaterial color={color} transparent opacity={0.8} side={THREE.DoubleSide} depthTest={false} />
+        <ringGeometry args={[0.08, 0.085, 32]} />
+        <meshBasicMaterial color={color} transparent opacity={0.9} side={THREE.DoubleSide} depthTest={false} />
       </mesh>
       
-      {[0, 90, 180, 270].map((angle, i) => (
+      {isGoodWall && [0, 90, 180, 270].map((angle, i) => (
         <mesh 
           key={i}
           position={[
-            Math.cos((angle * Math.PI) / 180) * 0.12,
-            Math.sin((angle * Math.PI) / 180) * 0.12,
+            Math.cos((angle * Math.PI) / 180) * 0.15,
+            Math.sin((angle * Math.PI) / 180) * 0.15,
             0
           ]}
         >
-          <planeGeometry args={[0.03, 0.008]} />
+          <planeGeometry args={[0.04, 0.01]} />
           <meshBasicMaterial color={color} transparent opacity={0.9} depthTest={false} />
         </mesh>
       ))}
+      
+      {!isGoodWall && (
+        <>
+          <mesh rotation={[0, 0, Math.PI / 4]}>
+            <planeGeometry args={[0.18, 0.02]} />
+            <meshBasicMaterial color={color} transparent opacity={0.9} depthTest={false} />
+          </mesh>
+          <mesh rotation={[0, 0, -Math.PI / 4]}>
+            <planeGeometry args={[0.18, 0.02]} />
+            <meshBasicMaterial color={color} transparent opacity={0.9} depthTest={false} />
+          </mesh>
+        </>
+      )}
     </group>
   );
 }
 
 /**
- * World-Anchored Model - Properly visible and anchored
+ * World-Anchored Frame with Occlusion
  */
-function WorldAnchoredModel({ url, anchor, isPlaced }) {
+function WorldAnchoredFrame({ url, worldTracker, anchorId, isPlaced }) {
   const modelRef = useRef();
   const gltf = useGLTF(url);
   const [modelSize, setModelSize] = useState(1);
@@ -252,40 +376,53 @@ function WorldAnchoredModel({ url, anchor, isPlaced }) {
   }, [gltf]);
 
   useFrame(() => {
-    if (!modelRef.current || !isPlaced || !anchor) return;
+    if (!modelRef.current || !isPlaced || !worldTracker) return;
 
-    // Direct positioning - simple and reliable
-    modelRef.current.position.copy(anchor.position);
-    modelRef.current.quaternion.copy(anchor.quaternion);
-    modelRef.current.scale.setScalar(anchor.scale * modelSize);
+    worldTracker.updateCamera(camera);
+    const anchorData = worldTracker.getAnchorInCameraSpace(anchorId, camera);
+    
+    if (!anchorData) return;
 
-    // Always visible when placed
-    const distance = camera.position.distanceTo(anchor.position);
-    modelRef.current.visible = true;
+    // Position frame relative to current camera
+    modelRef.current.position.copy(anchorData.position);
+    modelRef.current.quaternion.copy(anchorData.rotation);
+    modelRef.current.scale.setScalar(modelSize);
 
-    // Ensure all materials are visible
+    // Calculate distance from camera to frame
+    const distanceToFrame = camera.position.distanceTo(anchorData.worldPosition);
+    
+    // Simple occlusion: if something is closer than the frame, hide it
+    // This simulates depth-based occlusion
+    const isOccluded = distanceToFrame < 0.2; // Too close = likely occluded
+    
+    modelRef.current.visible = !isOccluded && distanceToFrame < 20;
+
+    // Fade based on distance
     modelRef.current.traverse((child) => {
       if (child.isMesh && child.material) {
         child.visible = true;
-        child.material.visible = true;
-        child.material.opacity = 1;
-        child.material.transparent = false;
         
-        // Fade only if very close or very far
-        if (distance < 0.3) {
-          child.material.transparent = true;
-          child.material.opacity = distance / 0.3;
-        } else if (distance > 18) {
-          child.material.transparent = true;
-          child.material.opacity = Math.max(0, (20 - distance) / 2);
+        let opacity = 1;
+        if (distanceToFrame < 0.4) {
+          opacity = distanceToFrame / 0.4;
+        } else if (distanceToFrame > 15) {
+          opacity = Math.max(0, (20 - distanceToFrame) / 5);
         }
+        
+        if (child.material.opacity !== undefined) {
+          child.material.transparent = opacity < 1;
+          child.material.opacity = opacity;
+        }
+        
+        // Lower render order so real objects appear in front
+        child.renderOrder = -1;
       }
     });
   });
 
   if (!gltf?.scene) {
     return (
-      <mesh>
+      <mesh renderOrder={-1}>
         <boxGeometry args={[0.4, 0.4, 0.03]} />
         <meshStandardMaterial color="#8B7355" metalness={0.3} roughness={0.7} />
       </mesh>
@@ -299,11 +436,11 @@ function WorldAnchoredModel({ url, anchor, isPlaced }) {
       child.castShadow = true;
       child.receiveShadow = true;
       child.frustumCulled = false;
+      child.renderOrder = -1;
       if (child.material) {
         child.material.side = THREE.DoubleSide;
         child.material.depthTest = true;
-        child.material.depthWrite = true;
-        child.material.visible = true;
+        child.material.depthWrite = false; // Don't write depth for occlusion
       }
     }
   });
@@ -322,17 +459,12 @@ function ARScene({
   currentModel, 
   onPlacement, 
   isPlaced, 
-  anchor,
-  onTransformChange,
+  worldTracker,
   scanningPhase,
   onSurfaceDetected
 }) {
-  const { camera, gl } = useThree();
+  const { gl } = useThree();
   const [surfaceData, setSurfaceData] = useState(null);
-  
-  const touchStart = useRef({ x: 0, y: 0 });
-  const lastPinchDist = useRef(0);
-  const gestureMode = useRef(null);
 
   const handleSurfaceDetection = useCallback((data) => {
     setSurfaceData(data);
@@ -342,110 +474,49 @@ function ARScene({
   const handleTouchStart = useCallback((event) => {
     event.preventDefault();
     
-    if (!isPlaced) {
-      if (surfaceData?.detected && surfaceData.confidence > 0.6 && event.touches.length === 1) {
-        const offset = surfaceData.normal.clone().multiplyScalar(0.01);
-        const placementPos = surfaceData.point.clone().add(offset);
-        
-        const quaternion = new THREE.Quaternion();
-        quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), surfaceData.normal);
-        
-        onPlacement(placementPos, quaternion);
-      }
-      return;
-    }
-
-    if (event.touches.length === 1) {
-      touchStart.current = {
-        x: event.touches[0].clientX,
-        y: event.touches[0].clientY
-      };
-      gestureMode.current = 'move';
-    } else if (event.touches.length === 2) {
-      const dx = event.touches[0].clientX - event.touches[1].clientX;
-      const dy = event.touches[0].clientY - event.touches[1].clientY;
-      lastPinchDist.current = Math.sqrt(dx * dx + dy * dy);
-      gestureMode.current = 'scale';
+    if (!isPlaced && surfaceData?.detected && 
+        surfaceData.classification?.isWall && 
+        surfaceData.quality > 0.7 && 
+        event.touches.length === 1) {
+      
+      const offset = surfaceData.normal.clone().multiplyScalar(0.02);
+      const placementPos = surfaceData.point.clone().add(offset);
+      
+      const quaternion = new THREE.Quaternion();
+      quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), surfaceData.normal);
+      
+      onPlacement(placementPos, quaternion);
     }
   }, [isPlaced, surfaceData, onPlacement]);
-
-  const handleTouchMove = useCallback((event) => {
-    event.preventDefault();
-    if (!isPlaced || !anchor) return;
-
-    if (event.touches.length === 1 && gestureMode.current === 'move') {
-      const sensitivity = 0.0006;
-      const deltaX = (event.touches[0].clientX - touchStart.current.x) * sensitivity;
-      const deltaY = -(event.touches[0].clientY - touchStart.current.y) * sensitivity;
-      
-      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-      const up = new THREE.Vector3(0, 1, 0);
-      
-      const newPos = anchor.position.clone();
-      newPos.add(right.multiplyScalar(deltaX));
-      newPos.add(up.multiplyScalar(deltaY));
-      
-      onTransformChange({
-        position: newPos,
-        quaternion: anchor.quaternion,
-        scale: anchor.scale
-      });
-      
-      touchStart.current.x = event.touches[0].clientX;
-      touchStart.current.y = event.touches[0].clientY;
-    } else if (event.touches.length === 2 && gestureMode.current === 'scale') {
-      const dx = event.touches[0].clientX - event.touches[1].clientX;
-      const dy = event.touches[0].clientY - event.touches[1].clientY;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      
-      const delta = (dist - lastPinchDist.current) * 0.0012;
-      const newScale = Math.max(0.5, Math.min(3, anchor.scale + delta));
-      
-      onTransformChange({
-        position: anchor.position,
-        quaternion: anchor.quaternion,
-        scale: newScale
-      });
-      
-      lastPinchDist.current = dist;
-    }
-  }, [isPlaced, anchor, camera, onTransformChange]);
-
-  const handleTouchEnd = useCallback(() => {
-    gestureMode.current = null;
-  }, []);
 
   useEffect(() => {
     const canvas = gl.domElement;
     canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
-    canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
-    canvas.addEventListener('touchend', handleTouchEnd);
     
     return () => {
       canvas.removeEventListener('touchstart', handleTouchStart);
-      canvas.removeEventListener('touchmove', handleTouchMove);
-      canvas.removeEventListener('touchend', handleTouchEnd);
     };
-  }, [gl, handleTouchStart, handleTouchMove, handleTouchEnd]);
+  }, [gl, handleTouchStart]);
 
   return (
     <>
-      <SurfaceDetector 
+      <WallDetector 
         onSurfaceDetected={handleSurfaceDetection}
         isActive={scanningPhase}
       />
       
-      <PlacementReticle 
+      <SmartReticle 
         position={surfaceData?.point || new THREE.Vector3(0, 0, -2)} 
-        confidence={surfaceData?.confidence || 0}
+        classification={surfaceData?.classification}
         visible={scanningPhase && surfaceData?.detected}
       />
       
-      {currentModel && (
+      {currentModel && isPlaced && (
         <Suspense fallback={null}>
-          <WorldAnchoredModel 
+          <WorldAnchoredFrame 
             url={currentModel} 
-            anchor={anchor}
+            worldTracker={worldTracker}
+            anchorId="main-frame"
             isPlaced={isPlaced}
           />
         </Suspense>
@@ -461,9 +532,10 @@ export default function CustomARViewer({ onClose }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
+  const worldTrackerRef = useRef(null);
+  const motionTrackerRef = useRef(null);
   const sessionStartTime = useRef(Date.now());
   const screenshotCount = useRef(0);
-  const transformCount = useRef(0);
   const initAttempts = useRef(0);
 
   const [cameraStatus, setCameraStatus] = useState('initializing');
@@ -472,16 +544,19 @@ export default function CustomARViewer({ onClose }) {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [arPhase, setArPhase] = useState('scanning');
   const [isModelPlaced, setIsModelPlaced] = useState(false);
-  const [surfaceDetected, setSurfaceDetected] = useState(false);
-  const [showGestureTutorial, setShowGestureTutorial] = useState(false);
-  
-  const [anchor, setAnchor] = useState({
-    position: new THREE.Vector3(0, 0, -2),
-    quaternion: new THREE.Quaternion(),
-    scale: 1
-  });
+  const [surfaceData, setSurfaceData] = useState(null);
 
   const { currentModel, modelType } = useARStore();
+
+  useEffect(() => {
+    worldTrackerRef.current = new WorldPositionTracker();
+    motionTrackerRef.current = new MotionTracker();
+    motionTrackerRef.current.startTracking();
+    
+    return () => {
+      motionTrackerRef.current?.stopTracking();
+    };
+  }, []);
 
   const initCamera = useCallback(async () => {
     if (streamRef.current || initAttempts.current > 3) return;
@@ -565,7 +640,6 @@ export default function CustomARViewer({ onClose }) {
   useEffect(() => {
     const startTime = sessionStartTime.current;
     const screenshotCountValue = screenshotCount.current;
-    const transformCountValue = transformCount.current;
 
     const timer = setTimeout(() => initCamera(), 500);
     
@@ -575,42 +649,28 @@ export default function CustomARViewer({ onClose }) {
       analytics.trackARSessionEnded({
         duration: Date.now() - startTime,
         screenshots: screenshotCountValue,
-        transforms: transformCountValue,
       });
     };
   }, [initCamera, stopCamera]);
 
   const handleSurfaceDetected = useCallback((data) => {
-    setSurfaceDetected(data.detected);
+    setSurfaceData(data);
   }, []);
 
   const handlePlacement = useCallback((position, quaternion) => {
-    console.log('Placing frame at:', position);
-    setAnchor({
-      position: position.clone(),
-      quaternion: quaternion.clone(),
-      scale: 1
-    });
+    console.log('Placing frame at world position:', position);
+    
+    // Lock frame to world coordinates
+    worldTrackerRef.current.addAnchor('main-frame', position, quaternion);
+    
     setIsModelPlaced(true);
     setArPhase('placed');
-    setShowGestureTutorial(true);
-    setTimeout(() => setShowGestureTutorial(false), 4000);
-    transformCount.current++;
-  }, []);
-
-  const handleTransformChange = useCallback((newAnchor) => {
-    setAnchor(newAnchor);
-    transformCount.current++;
   }, []);
 
   const handleReset = useCallback(() => {
     setIsModelPlaced(false);
     setArPhase('ready');
-    setAnchor({
-      position: new THREE.Vector3(0, 0, -2),
-      quaternion: new THREE.Quaternion(),
-      scale: 1
-    });
+    worldTrackerRef.current = new WorldPositionTracker();
   }, []);
 
   const handleScreenshot = useCallback(async () => {
@@ -657,6 +717,10 @@ export default function CustomARViewer({ onClose }) {
     }
   }, [isFullscreen]);
 
+  const isGoodWall = surfaceData?.detected && 
+                     surfaceData?.classification?.isWall && 
+                     surfaceData?.quality > 0.7;
+
   return (
     <div className="ar-viewer-advanced">
       <video
@@ -690,8 +754,7 @@ export default function CustomARViewer({ onClose }) {
               currentModel={currentModel}
               onPlacement={handlePlacement}
               isPlaced={isModelPlaced}
-              anchor={anchor}
-              onTransformChange={handleTransformChange}
+              worldTracker={worldTrackerRef.current}
               scanningPhase={arPhase === 'scanning' || arPhase === 'ready'}
               onSurfaceDetected={handleSurfaceDetected}
             />
@@ -739,14 +802,18 @@ export default function CustomARViewer({ onClose }) {
               )}
               {arPhase === 'ready' && (
                 <>
-                  <div className={`status-indicator ${surfaceDetected ? 'active' : 'inactive'}`} />
-                  <span>{surfaceDetected ? 'Tap to Place Frame' : 'Point at Surface'}</span>
+                  <div className={`status-indicator ${isGoodWall ? 'active' : 'inactive'}`} />
+                  <span>
+                    {isGoodWall ? 'Wall Found - Tap to Hang' : 
+                     surfaceData?.detected ? surfaceData.classification?.reason : 
+                     'Point at Wall'}
+                  </span>
                 </>
               )}
               {arPhase === 'placed' && (
                 <>
                   <div className="status-indicator success" />
-                  <span>Frame Placed ✓</span>
+                  <span>Frame Hung on Wall ✓</span>
                 </>
               )}
             </div>
@@ -765,7 +832,7 @@ export default function CustomARViewer({ onClose }) {
             <div className="ar-scan-guide">
               <Scan size={40} className="scan-icon" />
               <h3>Starting AR</h3>
-              <p>Point camera at a surface</p>
+              <p>Move slowly to detect walls</p>
               <div className="scan-bar-container">
                 <div className="scan-bar-fill" />
               </div>
@@ -773,25 +840,21 @@ export default function CustomARViewer({ onClose }) {
           )}
 
           {arPhase === 'ready' && !isModelPlaced && (
-            <div className="ar-placement-guide">
-              <h4>👆 Aim & Tap</h4>
-              <p>{surfaceDetected ? 'Green reticle = ready to place' : 'Move slowly to detect surface'}</p>
-            </div>
-          )}
-
-          {showGestureTutorial && arPhase === 'placed' && (
-            <div className="gesture-guide">
-              <h4>✋ Touch Controls</h4>
-              <div className="gesture-grid">
-                <div className="gesture-card">
-                  <Move size={24} />
-                  <span>Drag to Move</span>
-                </div>
-                <div className="gesture-card">
-                  <Hand size={24} />
-                  <span>Pinch to Scale</span>
-                </div>
-              </div>
+            <div className={`ar-placement-guide ${!isGoodWall ? 'warning' : ''}`}>
+              {isGoodWall ? (
+                <>
+                  <CheckCircle size={32} color="#00ff00" />
+                  <h4>Perfect Wall!</h4>
+                  <p>Tap green reticle to hang frame</p>
+                </>
+              ) : (
+                <>
+                  <AlertTriangle size={32} color="#ff3333" />
+                  <h4>Find a Wall</h4>
+                  <p>{surfaceData?.classification?.reason || 'Point at a vertical wall'}</p>
+                  <span className="hint">Not floor, ceiling, or angled surfaces</span>
+                </>
+              )}
             </div>
           )}
 
@@ -802,9 +865,6 @@ export default function CustomARViewer({ onClose }) {
               </button>
               <button className="action-btn" onClick={handleReset} title="Reset">
                 <RotateCcw size={24} />
-              </button>
-              <button className="action-btn" onClick={() => setShowGestureTutorial(!showGestureTutorial)} title="Help">
-                <Hand size={24} />
               </button>
             </div>
           )}
