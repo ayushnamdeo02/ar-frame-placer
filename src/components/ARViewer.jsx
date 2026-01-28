@@ -11,11 +11,9 @@ import {
   Camera, 
   Maximize2,
   Minimize2,
-  Grid,
   RotateCcw,
   RefreshCw,
   Move,
-  RotateCw,
   Hand,
   Scan
 } from 'lucide-react';
@@ -24,64 +22,12 @@ import useARStore from '../store/useARStore';
 import analytics from '../services/analytics';
 
 /**
- * Visual Inertial Odometry - Tracks camera position in world space
- */
-class VIOTracker {
-  constructor() {
-    this.worldPosition = new THREE.Vector3(0, 0, 0);
-    this.worldRotation = new THREE.Quaternion();
-    this.velocity = new THREE.Vector3();
-    this.lastUpdate = Date.now();
-    this.featurePoints = [];
-    this.isInitialized = false;
-  }
-
-  updateFromCamera(camera) {
-    const now = Date.now();
-    const dt = (now - this.lastUpdate) / 1000;
-    
-    if (!this.isInitialized) {
-      this.worldPosition.copy(camera.position);
-      this.worldRotation.copy(camera.quaternion);
-      this.isInitialized = true;
-    } else {
-      // Estimate velocity from position change
-      const deltaPos = new THREE.Vector3().subVectors(camera.position, this.worldPosition);
-      this.velocity.copy(deltaPos).divideScalar(Math.max(dt, 0.001));
-      
-      this.worldPosition.copy(camera.position);
-      this.worldRotation.copy(camera.quaternion);
-    }
-    
-    this.lastUpdate = now;
-  }
-
-  getWorldPosition() {
-    return this.worldPosition.clone();
-  }
-
-  getWorldRotation() {
-    return this.worldRotation.clone();
-  }
-
-  transformToWorld(localPos) {
-    return localPos.clone().applyQuaternion(this.worldRotation).add(this.worldPosition);
-  }
-
-  transformToLocal(worldPos) {
-    const invQuat = this.worldRotation.clone().invert();
-    return worldPos.clone().sub(this.worldPosition).applyQuaternion(invQuat);
-  }
-}
-
-/**
  * Surface Mesh Generator - Creates realistic surface detection
  */
 class SurfaceMesh {
   constructor(scene) {
     this.scene = scene;
     this.surfaces = [];
-    this.hitTestResults = new Map();
   }
 
   createSurface(position, normal, size = 2) {
@@ -94,7 +40,6 @@ class SurfaceMesh {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.position.copy(position);
     
-    // Orient plane to face normal
     const quaternion = new THREE.Quaternion();
     quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
     mesh.quaternion.copy(quaternion);
@@ -107,14 +52,6 @@ class SurfaceMesh {
     this.surfaces.push(mesh);
     
     return mesh;
-  }
-
-  removeSurface(surface) {
-    const index = this.surfaces.indexOf(surface);
-    if (index > -1) {
-      this.surfaces.splice(index, 1);
-      this.scene.remove(surface);
-    }
   }
 
   getSurfaces() {
@@ -130,7 +67,7 @@ class SurfaceMesh {
 /**
  * Real-time Surface Detector with Spatial Mapping
  */
-function SurfaceDetector({ onSurfaceDetected, isActive, vioTracker }) {
+function SurfaceDetector({ onSurfaceDetected, isActive }) {
   const { camera, scene } = useThree();
   const raycaster = useRef(new THREE.Raycaster());
   const surfaceMesh = useRef(null);
@@ -140,7 +77,6 @@ function SurfaceDetector({ onSurfaceDetected, isActive, vioTracker }) {
   useEffect(() => {
     surfaceMesh.current = new SurfaceMesh(scene);
     
-    // Create detection grid around camera
     const gridPositions = [
       [0, 0, -2], [0, 0, -3], [0, 0, -4],
       [-1, 0, -2], [1, 0, -2],
@@ -166,14 +102,8 @@ function SurfaceDetector({ onSurfaceDetected, isActive, vioTracker }) {
     if (!isActive || !surfaceMesh.current) return;
 
     frameCounter.current++;
-    
-    // Update VIO tracker
-    if (vioTracker) {
-      vioTracker.updateFromCamera(camera);
-    }
 
-    // Multi-ray surface detection
-    if (frameCounter.current % 1 === 0) { // Check every frame
+    if (frameCounter.current % 1 === 0) {
       const samplePattern = [
         new THREE.Vector2(0, 0),
         new THREE.Vector2(0.1, 0),
@@ -194,7 +124,6 @@ function SurfaceDetector({ onSurfaceDetected, isActive, vioTracker }) {
           const distance = hit.distance;
           const normal = hit.object.userData.normal;
           
-          // Calculate hit quality score
           const viewDir = camera.getWorldDirection(new THREE.Vector3());
           const alignment = Math.abs(normal.dot(viewDir));
           const distanceScore = Math.max(0, 1 - distance / 5);
@@ -213,13 +142,11 @@ function SurfaceDetector({ onSurfaceDetected, isActive, vioTracker }) {
       });
 
       if (bestHit) {
-        // Add to buffer for smoothing
         detectionBuffer.current.push(bestHit);
         if (detectionBuffer.current.length > 8) {
           detectionBuffer.current.shift();
         }
 
-        // Calculate smoothed average
         if (detectionBuffer.current.length >= 3) {
           const avgPoint = new THREE.Vector3();
           const avgNormal = new THREE.Vector3();
@@ -307,102 +234,50 @@ function PlacementReticle({ position, confidence, visible }) {
 }
 
 /**
- * Depth Occluder - Hides frame behind real objects
+ * World-Anchored Model - Properly visible and anchored
  */
-function DepthOccluder({ cameraPosition, framePosition, isActive }) {
-  const meshRef = useRef();
-  
-  useFrame(() => {
-    if (meshRef.current && isActive && framePosition) {
-      // Position occluder between camera and frame
-      const midPoint = new THREE.Vector3()
-        .addVectors(cameraPosition, framePosition)
-        .multiplyScalar(0.5);
-      
-      meshRef.current.position.copy(midPoint);
-      meshRef.current.lookAt(cameraPosition);
-    }
-  });
-  
-  if (!isActive) return null;
-  
-  return (
-    <mesh ref={meshRef} renderOrder={-1}>
-      <planeGeometry args={[5, 5]} />
-      <meshBasicMaterial
-        colorWrite={false}
-        depthWrite={true}
-        transparent
-        opacity={0}
-      />
-    </mesh>
-  );
-}
-
-/**
- * World-Anchored Model - Truly fixed in space
- */
-function WorldAnchoredModel({ url, anchor, isPlaced, vioTracker }) {
+function WorldAnchoredModel({ url, anchor, isPlaced }) {
   const modelRef = useRef();
-  const worldAnchor = useRef(null);
   const gltf = useGLTF(url);
   const [modelSize, setModelSize] = useState(1);
+  const { camera } = useThree();
 
   useEffect(() => {
     if (gltf?.scene) {
       const box = new THREE.Box3().setFromObject(gltf.scene);
       const size = box.getSize(new THREE.Vector3());
       const maxDim = Math.max(size.x, size.y, size.z);
-      setModelSize(0.35 / maxDim);
+      setModelSize(0.4 / maxDim);
     }
   }, [gltf]);
 
-  // Lock world position when placed
-  useEffect(() => {
-    if (isPlaced && anchor && vioTracker) {
-      // Convert camera-relative position to absolute world position
-      const worldPos = vioTracker.transformToWorld(anchor.position);
-      const worldQuat = vioTracker.getWorldRotation().clone().multiply(anchor.quaternion);
-      
-      worldAnchor.current = {
-        worldPosition: worldPos,
-        worldQuaternion: worldQuat,
-        scale: anchor.scale,
-        locked: true
-      };
-      
-      console.log('Frame anchored at world position:', worldPos);
-    }
-  }, [isPlaced, anchor, vioTracker]);
-
   useFrame(() => {
-    if (!modelRef.current || !isPlaced || !worldAnchor.current?.locked) return;
+    if (!modelRef.current || !isPlaced || !anchor) return;
 
-    // Model stays at ABSOLUTE world position
-    // Camera movement doesn't affect this
-    const modelWorldPos = worldAnchor.current.worldPosition;
-    const cameraWorldPos = vioTracker.getWorldPosition();
-    
-    // Convert world position back to camera-relative for rendering
-    const relativePos = vioTracker.transformToLocal(modelWorldPos);
-    
-    modelRef.current.position.copy(relativePos);
-    modelRef.current.quaternion.copy(worldAnchor.current.worldQuaternion);
-    modelRef.current.scale.setScalar(worldAnchor.current.scale * modelSize);
+    // Direct positioning - simple and reliable
+    modelRef.current.position.copy(anchor.position);
+    modelRef.current.quaternion.copy(anchor.quaternion);
+    modelRef.current.scale.setScalar(anchor.scale * modelSize);
 
-    // Visibility based on distance
-    const distance = cameraWorldPos.distanceTo(modelWorldPos);
-    modelRef.current.visible = distance > 0.2 && distance < 20;
+    // Always visible when placed
+    const distance = camera.position.distanceTo(anchor.position);
+    modelRef.current.visible = true;
 
-    // Smooth opacity fade
+    // Ensure all materials are visible
     modelRef.current.traverse((child) => {
       if (child.isMesh && child.material) {
-        let opacity = 1;
-        if (distance < 0.5) opacity = distance / 0.5;
-        if (distance > 15) opacity = Math.max(0, (20 - distance) / 5);
+        child.visible = true;
+        child.material.visible = true;
+        child.material.opacity = 1;
+        child.material.transparent = false;
         
-        if (child.material.opacity !== undefined) {
-          child.material.opacity = opacity;
+        // Fade only if very close or very far
+        if (distance < 0.3) {
+          child.material.transparent = true;
+          child.material.opacity = distance / 0.3;
+        } else if (distance > 18) {
+          child.material.transparent = true;
+          child.material.opacity = Math.max(0, (20 - distance) / 2);
         }
       }
     });
@@ -411,8 +286,8 @@ function WorldAnchoredModel({ url, anchor, isPlaced, vioTracker }) {
   if (!gltf?.scene) {
     return (
       <mesh>
-        <boxGeometry args={[0.35, 0.35, 0.02]} />
-        <meshStandardMaterial color="#cccccc" />
+        <boxGeometry args={[0.4, 0.4, 0.03]} />
+        <meshStandardMaterial color="#8B7355" metalness={0.3} roughness={0.7} />
       </mesh>
     );
   }
@@ -423,11 +298,12 @@ function WorldAnchoredModel({ url, anchor, isPlaced, vioTracker }) {
     if (child.isMesh) {
       child.castShadow = true;
       child.receiveShadow = true;
+      child.frustumCulled = false;
       if (child.material) {
         child.material.side = THREE.DoubleSide;
-        child.material.transparent = true;
         child.material.depthTest = true;
         child.material.depthWrite = true;
+        child.material.visible = true;
       }
     }
   });
@@ -449,13 +325,12 @@ function ARScene({
   anchor,
   onTransformChange,
   scanningPhase,
-  onSurfaceDetected,
-  vioTracker
+  onSurfaceDetected
 }) {
   const { camera, gl } = useThree();
   const [surfaceData, setSurfaceData] = useState(null);
   
-  const touchStart = useRef({ x: 0, y: 0, distance: 0 });
+  const touchStart = useRef({ x: 0, y: 0 });
   const lastPinchDist = useRef(0);
   const gestureMode = useRef(null);
 
@@ -558,7 +433,6 @@ function ARScene({
       <SurfaceDetector 
         onSurfaceDetected={handleSurfaceDetection}
         isActive={scanningPhase}
-        vioTracker={vioTracker}
       />
       
       <PlacementReticle 
@@ -567,19 +441,12 @@ function ARScene({
         visible={scanningPhase && surfaceData?.detected}
       />
       
-      <DepthOccluder
-        cameraPosition={camera.position}
-        framePosition={anchor?.position}
-        isActive={isPlaced}
-      />
-      
       {currentModel && (
         <Suspense fallback={null}>
           <WorldAnchoredModel 
             url={currentModel} 
             anchor={anchor}
             isPlaced={isPlaced}
-            vioTracker={vioTracker}
           />
         </Suspense>
       )}
@@ -594,7 +461,6 @@ export default function CustomARViewer({ onClose }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
-  const vioTrackerRef = useRef(null);
   const sessionStartTime = useRef(Date.now());
   const screenshotCount = useRef(0);
   const transformCount = useRef(0);
@@ -615,12 +481,7 @@ export default function CustomARViewer({ onClose }) {
     scale: 1
   });
 
-  const { currentModel, modelType, showGrid, toggleGrid } = useARStore();
-
-  // Initialize VIO tracker
-  useEffect(() => {
-    vioTrackerRef.current = new VIOTracker();
-  }, []);
+  const { currentModel, modelType } = useARStore();
 
   const initCamera = useCallback(async () => {
     if (streamRef.current || initAttempts.current > 3) return;
@@ -673,7 +534,7 @@ export default function CustomARViewer({ onClose }) {
       await video.play();
       setCameraStatus('ready');
       
-      setTimeout(() => setArPhase('ready'), 2000);
+      setTimeout(() => setArPhase('ready'), 1500);
       analytics.trackARSessionStarted({ url: currentModel, type: modelType });
     } catch (error) {
       setCameraStatus('error');
@@ -724,6 +585,7 @@ export default function CustomARViewer({ onClose }) {
   }, []);
 
   const handlePlacement = useCallback((position, quaternion) => {
+    console.log('Placing frame at:', position);
     setAnchor({
       position: position.clone(),
       quaternion: quaternion.clone(),
@@ -732,7 +594,7 @@ export default function CustomARViewer({ onClose }) {
     setIsModelPlaced(true);
     setArPhase('placed');
     setShowGestureTutorial(true);
-    setTimeout(() => setShowGestureTutorial(false), 5000);
+    setTimeout(() => setShowGestureTutorial(false), 4000);
     transformCount.current++;
   }, []);
 
@@ -818,12 +680,11 @@ export default function CustomARViewer({ onClose }) {
             frameloop="always"
           >
             <PerspectiveCamera makeDefault position={[0, 0, 0]} fov={70} />
-            <ambientLight intensity={0.5} />
-            <directionalLight position={[5, 5, 5]} intensity={1} castShadow />
-            <pointLight position={[-5, 5, -5]} intensity={0.3} />
+            <ambientLight intensity={0.6} />
+            <directionalLight position={[5, 5, 5]} intensity={1.2} castShadow />
+            <pointLight position={[-5, 5, -5]} intensity={0.4} />
+            <hemisphereLight intensity={0.5} />
             <Environment preset="city" />
-            
-            {showGrid && <gridHelper args={[10, 10]} position={[0, -1.5, 0]} />}
             
             <ARScene 
               currentModel={currentModel}
@@ -833,7 +694,6 @@ export default function CustomARViewer({ onClose }) {
               onTransformChange={handleTransformChange}
               scanningPhase={arPhase === 'scanning' || arPhase === 'ready'}
               onSurfaceDetected={handleSurfaceDetected}
-              vioTracker={vioTrackerRef.current}
             />
           </Canvas>
         </div>
@@ -874,27 +734,24 @@ export default function CustomARViewer({ onClose }) {
               {arPhase === 'scanning' && (
                 <>
                   <div className="status-spinner-mini" />
-                  <span>Mapping Space...</span>
+                  <span>Initializing AR...</span>
                 </>
               )}
               {arPhase === 'ready' && (
                 <>
                   <div className={`status-indicator ${surfaceDetected ? 'active' : 'inactive'}`} />
-                  <span>{surfaceDetected ? 'Surface Found' : 'Scanning...'}</span>
+                  <span>{surfaceDetected ? 'Tap to Place Frame' : 'Point at Surface'}</span>
                 </>
               )}
               {arPhase === 'placed' && (
                 <>
                   <div className="status-indicator success" />
-                  <span>Frame Anchored</span>
+                  <span>Frame Placed ✓</span>
                 </>
               )}
             </div>
 
             <div className="ar-actions-bar">
-              <button className="ar-btn-action" onClick={toggleGrid}>
-                <Grid size={18} />
-              </button>
               <button className="ar-btn-action" onClick={switchCamera}>
                 <RefreshCw size={18} />
               </button>
@@ -907,8 +764,8 @@ export default function CustomARViewer({ onClose }) {
           {arPhase === 'scanning' && (
             <div className="ar-scan-guide">
               <Scan size={40} className="scan-icon" />
-              <h3>Scanning Environment</h3>
-              <p>Move device slowly to detect surfaces</p>
+              <h3>Starting AR</h3>
+              <p>Point camera at a surface</p>
               <div className="scan-bar-container">
                 <div className="scan-bar-fill" />
               </div>
@@ -917,26 +774,22 @@ export default function CustomARViewer({ onClose }) {
 
           {arPhase === 'ready' && !isModelPlaced && (
             <div className="ar-placement-guide">
-              <h4>Aim at Wall</h4>
-              <p>Tap when green reticle appears</p>
+              <h4>👆 Aim & Tap</h4>
+              <p>{surfaceDetected ? 'Green reticle = ready to place' : 'Move slowly to detect surface'}</p>
             </div>
           )}
 
           {showGestureTutorial && arPhase === 'placed' && (
             <div className="gesture-guide">
-              <h4>✋ Controls</h4>
+              <h4>✋ Touch Controls</h4>
               <div className="gesture-grid">
                 <div className="gesture-card">
-                  <Move size={20} />
-                  <span>Drag</span>
+                  <Move size={24} />
+                  <span>Drag to Move</span>
                 </div>
                 <div className="gesture-card">
-                  <Hand size={20} />
-                  <span>Pinch</span>
-                </div>
-                <div className="gesture-card">
-                  <RotateCw size={20} />
-                  <span>Rotate</span>
+                  <Hand size={24} />
+                  <span>Pinch to Scale</span>
                 </div>
               </div>
             </div>
@@ -944,14 +797,14 @@ export default function CustomARViewer({ onClose }) {
 
           {isModelPlaced && (
             <div className="ar-action-panel">
-              <button className="action-btn primary" onClick={handleScreenshot}>
-                <Camera size={22} />
+              <button className="action-btn primary" onClick={handleScreenshot} title="Take Photo">
+                <Camera size={24} />
               </button>
-              <button className="action-btn" onClick={handleReset}>
-                <RotateCcw size={22} />
+              <button className="action-btn" onClick={handleReset} title="Reset">
+                <RotateCcw size={24} />
               </button>
-              <button className="action-btn" onClick={() => setShowGestureTutorial(!showGestureTutorial)}>
-                <Hand size={22} />
+              <button className="action-btn" onClick={() => setShowGestureTutorial(!showGestureTutorial)} title="Help">
+                <Hand size={24} />
               </button>
             </div>
           )}
