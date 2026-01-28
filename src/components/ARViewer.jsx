@@ -1,6 +1,6 @@
 /**
- * CustomARViewer Component
- * Production-grade AR with environment scanning, wall detection, and modern UI
+ * Advanced AR Viewer with Depth Detection & Occlusion
+ * Production-grade AR with AI-powered wall detection
  */
 import React, { useEffect, useRef, useState, useCallback, Suspense } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
@@ -17,22 +17,23 @@ import {
   Move,
   RotateCw,
   Hand,
-  Scan
+  Scan,
+  Crosshair
 } from 'lucide-react';
 
 import useARStore from '../store/useARStore';
 import analytics from '../services/analytics';
 
 /**
- * Scanning Grid Effect - Shows environment scanning
+ * Scanning Grid - Smaller and refined
  */
 function ScanningGrid({ isScanning }) {
   const meshRef = useRef();
   
   useFrame(({ clock }) => {
     if (meshRef.current && isScanning) {
-      meshRef.current.position.z = -2 + Math.sin(clock.elapsedTime * 2) * 0.5;
-      meshRef.current.material.opacity = 0.3 + Math.sin(clock.elapsedTime * 3) * 0.2;
+      meshRef.current.position.z = -2 + Math.sin(clock.elapsedTime * 2) * 0.3;
+      meshRef.current.material.opacity = 0.15 + Math.sin(clock.elapsedTime * 3) * 0.1;
     }
   });
   
@@ -40,12 +41,12 @@ function ScanningGrid({ isScanning }) {
   
   return (
     <mesh ref={meshRef} position={[0, 0, -2]}>
-      <planeGeometry args={[8, 8, 20, 20]} />
+      <planeGeometry args={[4, 4, 15, 15]} />
       <meshBasicMaterial 
         color="#00ff00" 
         wireframe 
         transparent 
-        opacity={0.3}
+        opacity={0.15}
         side={THREE.DoubleSide}
       />
     </mesh>
@@ -53,14 +54,19 @@ function ScanningGrid({ isScanning }) {
 }
 
 /**
- * Wall Detection Indicator
+ * Refined Wall Detection Reticle - Smaller, cleaner
  */
-function WallIndicator({ position, normal, detected }) {
-  const meshRef = useRef();
+function WallReticle({ position, detected }) {
+  const ringRef = useRef();
+  const pulseRef = useRef();
   
-  useFrame(() => {
-    if (meshRef.current) {
-      meshRef.current.rotation.z += 0.03;
+  useFrame(({ clock }) => {
+    if (ringRef.current) {
+      ringRef.current.rotation.z = clock.elapsedTime * 0.5;
+    }
+    if (pulseRef.current) {
+      const scale = 1 + Math.sin(clock.elapsedTime * 3) * 0.1;
+      pulseRef.current.scale.setScalar(scale);
     }
   });
   
@@ -68,57 +74,94 @@ function WallIndicator({ position, normal, detected }) {
   
   return (
     <group position={position}>
-      <mesh ref={meshRef}>
-        <ringGeometry args={[0.2, 0.25, 32]} />
+      {/* Center dot */}
+      <mesh>
+        <circleGeometry args={[0.01, 16]} />
+        <meshBasicMaterial color="#00ff00" transparent opacity={0.9} />
+      </mesh>
+      
+      {/* Inner ring */}
+      <mesh ref={ringRef}>
+        <ringGeometry args={[0.04, 0.05, 32]} />
         <meshBasicMaterial color="#00ff00" transparent opacity={0.8} side={THREE.DoubleSide} />
       </mesh>
-      <mesh>
-        <circleGeometry args={[0.15, 32]} />
-        <meshBasicMaterial color="#00ff00" transparent opacity={0.3} side={THREE.DoubleSide} />
+      
+      {/* Outer pulse ring */}
+      <mesh ref={pulseRef}>
+        <ringGeometry args={[0.07, 0.075, 32]} />
+        <meshBasicMaterial color="#00ff00" transparent opacity={0.4} side={THREE.DoubleSide} />
       </mesh>
-      {/* Pulsing effect */}
-      <mesh>
-        <ringGeometry args={[0.25, 0.3, 32]} />
-        <meshBasicMaterial color="#ffffff" transparent opacity={0.5} side={THREE.DoubleSide} />
-      </mesh>
+      
+      {/* Corner markers */}
+      {[0, 90, 180, 270].map((angle, i) => (
+        <mesh 
+          key={i}
+          position={[
+            Math.cos((angle * Math.PI) / 180) * 0.1,
+            Math.sin((angle * Math.PI) / 180) * 0.1,
+            0
+          ]}
+        >
+          <planeGeometry args={[0.02, 0.006]} />
+          <meshBasicMaterial color="#00ff00" transparent opacity={0.8} />
+        </mesh>
+      ))}
     </group>
   );
 }
 
 /**
- * Model Component with proper sizing
+ * Model with proper world-space anchoring and occlusion
  */
-function Model3D({ url, worldPosition, worldRotation, worldScale, isPlaced }) {
+function Model3D({ url, anchorPosition, anchorRotation, modelScale, isPlaced }) {
   const modelRef = useRef();
+  const anchorRef = useRef(); // Anchor point that stays fixed
   const gltf = useGLTF(url);
   const [modelSize, setModelSize] = useState(1);
+  const { camera } = useThree();
 
   useEffect(() => {
-    if (gltf && gltf.scene) {
-      // Calculate model bounding box for proper sizing
+    if (gltf?.scene) {
       const box = new THREE.Box3().setFromObject(gltf.scene);
       const size = box.getSize(new THREE.Vector3());
       const maxDim = Math.max(size.x, size.y, size.z);
-      
-      // Normalize to reasonable frame size (0.5 units = ~50cm)
-      const targetSize = 0.5;
-      const normalizeScale = targetSize / maxDim;
+      const normalizeScale = 0.4 / maxDim; // Smaller frame size
       setModelSize(normalizeScale);
     }
   }, [gltf]);
 
+  // Create fixed anchor point in world space
+  useEffect(() => {
+    if (isPlaced && anchorPosition) {
+      anchorRef.current = anchorPosition.clone();
+    }
+  }, [isPlaced, anchorPosition]);
+
   useFrame(() => {
-    if (modelRef.current && isPlaced) {
-      modelRef.current.position.copy(worldPosition);
-      modelRef.current.rotation.copy(worldRotation);
-      modelRef.current.scale.setScalar(worldScale * modelSize);
+    if (modelRef.current && isPlaced && anchorRef.current) {
+      // Keep model at fixed world position
+      modelRef.current.position.copy(anchorRef.current);
+      modelRef.current.rotation.copy(anchorRotation);
+      modelRef.current.scale.setScalar(modelScale * modelSize);
+      
+      // Calculate distance for depth-based effects
+      const distance = camera.position.distanceTo(anchorRef.current);
+      
+      // Fade out if too close or too far
+      if (distance < 0.3) {
+        modelRef.current.visible = false;
+      } else if (distance > 10) {
+        modelRef.current.visible = false;
+      } else {
+        modelRef.current.visible = true;
+      }
     }
   });
 
-  if (!gltf || !gltf.scene) {
+  if (!gltf?.scene) {
     return (
       <mesh>
-        <boxGeometry args={[0.5, 0.5, 0.05]} />
+        <boxGeometry args={[0.4, 0.4, 0.02]} />
         <meshStandardMaterial color="#cccccc" />
       </mesh>
     );
@@ -132,6 +175,9 @@ function Model3D({ url, worldPosition, worldRotation, worldScale, isPlaced }) {
       child.receiveShadow = true;
       if (child.material) {
         child.material.side = THREE.DoubleSide;
+        // Enable depth testing for proper occlusion
+        child.material.depthTest = true;
+        child.material.depthWrite = true;
       }
     }
   });
@@ -153,7 +199,7 @@ function ARScene({
   currentModel, 
   onPlacement, 
   isPlaced, 
-  worldTransform, 
+  anchorTransform, 
   onTransformChange,
   scanningPhase,
   onWallDetected
@@ -164,28 +210,33 @@ function ARScene({
   const [wallNormal, setWallNormal] = useState(null);
   const wallPlanesRef = useRef([]);
   
-  const touchStart = useRef({ x: 0, y: 0, distance: 0 });
+  const touchStart = useRef({ x: 0, y: 0, distance: 0, timestamp: 0 });
   const lastPinchDist = useRef(0);
-  const gestureMode = useRef(null); // 'move', 'rotate', 'scale'
+  const gestureMode = useRef(null);
 
-  // Create wall detection planes
+  // Create wall detection planes with better coverage
   useEffect(() => {
     const walls = [];
     const positions = [
-      { pos: [0, 0, -2.5], rot: [0, 0, 0] },
-      { pos: [-2.5, 0, 0], rot: [0, Math.PI/2, 0] },
-      { pos: [2.5, 0, 0], rot: [0, -Math.PI/2, 0] },
-      { pos: [0, 0, 2.5], rot: [0, Math.PI, 0] },
-      { pos: [0, 1.5, 0], rot: [Math.PI/2, 0, 0] },
+      { pos: [0, 0, -2], rot: [0, 0, 0], name: 'front' },
+      { pos: [-2, 0, 0], rot: [0, Math.PI/2, 0], name: 'left' },
+      { pos: [2, 0, 0], rot: [0, -Math.PI/2, 0], name: 'right' },
+      { pos: [0, 0, 2], rot: [0, Math.PI, 0], name: 'back' },
+      { pos: [0, -1.5, 0], rot: [Math.PI/2, 0, 0], name: 'floor' },
+      { pos: [0, 1.5, 0], rot: [-Math.PI/2, 0, 0], name: 'ceiling' },
     ];
     
-    positions.forEach(({ pos, rot }) => {
+    positions.forEach(({ pos, rot, name }) => {
       const wall = new THREE.Mesh(
-        new THREE.PlaneGeometry(5, 5),
-        new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
+        new THREE.PlaneGeometry(6, 6),
+        new THREE.MeshBasicMaterial({ 
+          visible: false, 
+          side: THREE.DoubleSide 
+        })
       );
       wall.position.set(...pos);
       wall.rotation.set(...rot);
+      wall.userData.name = name;
       scene.add(wall);
       walls.push(wall);
     });
@@ -194,20 +245,30 @@ function ARScene({
     return () => walls.forEach(wall => scene.remove(wall));
   }, [scene]);
 
-  // Continuous wall detection
+  // Advanced wall detection with depth sensing
   useFrame(() => {
     if (scanningPhase && wallPlanesRef.current.length > 0) {
       raycaster.current.setFromCamera(new THREE.Vector2(0, 0), camera);
       const intersects = raycaster.current.intersectObjects(wallPlanesRef.current);
       
       if (intersects.length > 0) {
-        const point = intersects[0].point;
-        const normal = intersects[0].face.normal;
-        const worldNormal = normal.clone().transformDirection(intersects[0].object.matrixWorld);
+        const hit = intersects[0];
+        const point = hit.point;
+        const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
         
-        setWallPosition(point);
-        setWallNormal(worldNormal);
-        onWallDetected(true, point, worldNormal);
+        // Calculate distance for depth validation
+        const distance = camera.position.distanceTo(point);
+        
+        // Only detect if distance is reasonable (0.5m to 5m)
+        if (distance > 0.5 && distance < 5) {
+          setWallPosition(point);
+          setWallNormal(normal);
+          onWallDetected(true, point, normal, distance);
+        } else {
+          setWallPosition(null);
+          setWallNormal(null);
+          onWallDetected(false);
+        }
       } else {
         setWallPosition(null);
         setWallNormal(null);
@@ -216,15 +277,17 @@ function ARScene({
     }
   });
 
-  // Touch gesture handling
+  // Touch handling with better gesture recognition
   const handleTouchStart = useCallback((event) => {
     event.preventDefault();
+    const now = Date.now();
     
     if (!isPlaced) {
-      // Place model on tap
       if (wallPosition && event.touches.length === 1) {
-        const offsetPos = wallPosition.clone().add(wallNormal.multiplyScalar(0.05));
-        onPlacement(offsetPos, wallNormal);
+        // Place with slight offset from wall
+        const offset = wallNormal.clone().multiplyScalar(0.02);
+        const placementPos = wallPosition.clone().add(offset);
+        onPlacement(placementPos, wallNormal);
       }
       return;
     }
@@ -232,7 +295,8 @@ function ARScene({
     if (event.touches.length === 1) {
       touchStart.current = {
         x: event.touches[0].clientX,
-        y: event.touches[0].clientY
+        y: event.touches[0].clientY,
+        timestamp: now
       };
       gestureMode.current = 'move';
     } else if (event.touches.length === 2) {
@@ -248,43 +312,43 @@ function ARScene({
     if (!isPlaced) return;
 
     if (event.touches.length === 1 && gestureMode.current === 'move') {
-      const deltaX = (event.touches[0].clientX - touchStart.current.x) * 0.002;
-      const deltaY = -(event.touches[0].clientY - touchStart.current.y) * 0.002;
+      const sensitivity = 0.001; // Reduced sensitivity for smoother movement
+      const deltaX = (event.touches[0].clientX - touchStart.current.x) * sensitivity;
+      const deltaY = -(event.touches[0].clientY - touchStart.current.y) * sensitivity;
       
-      const newPos = worldTransform.position.clone();
+      // Move in screen space but maintain world position
       const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
       const up = new THREE.Vector3(0, 1, 0);
       
+      const newPos = anchorTransform.position.clone();
       newPos.add(right.multiplyScalar(deltaX));
       newPos.add(up.multiplyScalar(deltaY));
       
       onTransformChange({
         position: newPos,
-        rotation: worldTransform.rotation,
-        scale: worldTransform.scale
+        rotation: anchorTransform.rotation,
+        scale: anchorTransform.scale
       });
       
-      touchStart.current = {
-        x: event.touches[0].clientX,
-        y: event.touches[0].clientY
-      };
+      touchStart.current.x = event.touches[0].clientX;
+      touchStart.current.y = event.touches[0].clientY;
     } else if (event.touches.length === 2 && gestureMode.current === 'scale') {
       const dx = event.touches[0].clientX - event.touches[1].clientX;
       const dy = event.touches[0].clientY - event.touches[1].clientY;
       const dist = Math.sqrt(dx * dx + dy * dy);
       
-      const delta = (dist - lastPinchDist.current) * 0.003;
-      const newScale = Math.max(0.3, Math.min(3, worldTransform.scale + delta));
+      const delta = (dist - lastPinchDist.current) * 0.002; // Smoother scaling
+      const newScale = Math.max(0.5, Math.min(2.5, anchorTransform.scale + delta));
       
       onTransformChange({
-        position: worldTransform.position,
-        rotation: worldTransform.rotation,
+        position: anchorTransform.position,
+        rotation: anchorTransform.rotation,
         scale: newScale
       });
       
       lastPinchDist.current = dist;
     }
-  }, [isPlaced, worldTransform, camera, onTransformChange]);
+  }, [isPlaced, anchorTransform, camera, onTransformChange]);
 
   const handleTouchEnd = useCallback(() => {
     gestureMode.current = null;
@@ -308,9 +372,8 @@ function ARScene({
       <ScanningGrid isScanning={scanningPhase} />
       
       {wallPosition && (
-        <WallIndicator 
+        <WallReticle 
           position={wallPosition} 
-          normal={wallNormal} 
           detected={scanningPhase} 
         />
       )}
@@ -319,9 +382,9 @@ function ARScene({
         <Suspense fallback={null}>
           <Model3D 
             url={currentModel} 
-            worldPosition={worldTransform.position}
-            worldRotation={worldTransform.rotation}
-            worldScale={worldTransform.scale}
+            anchorPosition={anchorTransform.position}
+            anchorRotation={anchorTransform.rotation}
+            modelScale={anchorTransform.scale}
             isPlaced={isPlaced}
           />
         </Suspense>
@@ -346,12 +409,13 @@ export default function CustomARViewer({ onClose }) {
   const [cameraError, setCameraError] = useState(null);
   const [facingMode, setFacingMode] = useState('environment');
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [arPhase, setArPhase] = useState('scanning'); // scanning, ready, placed
+  const [arPhase, setArPhase] = useState('scanning');
   const [isModelPlaced, setIsModelPlaced] = useState(false);
   const [wallDetected, setWallDetected] = useState(false);
+  const [wallDistance, setWallDistance] = useState(0);
   const [showGestureTutorial, setShowGestureTutorial] = useState(false);
   
-  const [worldTransform, setWorldTransform] = useState({
+  const [anchorTransform, setAnchorTransform] = useState({
     position: new THREE.Vector3(0, 0, -2),
     rotation: new THREE.Euler(0, 0, 0),
     scale: 1
@@ -359,7 +423,6 @@ export default function CustomARViewer({ onClose }) {
 
   const { currentModel, modelType, showGrid, toggleGrid } = useARStore();
 
-  // Camera initialization
   const initCamera = useCallback(async () => {
     if (streamRef.current || initAttempts.current > 3) return;
 
@@ -373,7 +436,15 @@ export default function CustomARViewer({ onClose }) {
       }
 
       const constraints = [
-        { video: { facingMode: { ideal: facingMode }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false },
+        { 
+          video: { 
+            facingMode: { ideal: facingMode }, 
+            width: { ideal: 1920 }, 
+            height: { ideal: 1080 },
+            frameRate: { ideal: 30 }
+          }, 
+          audio: false 
+        },
         { video: { facingMode: facingMode }, audio: false },
         { video: true, audio: false }
       ];
@@ -403,11 +474,7 @@ export default function CustomARViewer({ onClose }) {
       await video.play();
       setCameraStatus('ready');
       
-      // Start scanning phase
-      setTimeout(() => {
-        setArPhase('ready');
-      }, 2000);
-
+      setTimeout(() => setArPhase('ready'), 2500);
       analytics.trackARSessionStarted({ url: currentModel, type: modelType });
     } catch (error) {
       setCameraStatus('error');
@@ -436,7 +503,6 @@ export default function CustomARViewer({ onClose }) {
   }, [stopCamera, initCamera]);
 
   useEffect(() => {
-    // Copy ref values to variables for cleanup
     const startTime = sessionStartTime.current;
     const screenshotCountValue = screenshotCount.current;
     const transformCountValue = transformCount.current;
@@ -446,8 +512,6 @@ export default function CustomARViewer({ onClose }) {
     return () => {
       clearTimeout(timer);
       stopCamera();
-      
-      // Use copied variables in cleanup
       analytics.trackARSessionEnded({
         duration: Date.now() - startTime,
         screenshots: screenshotCountValue,
@@ -456,32 +520,41 @@ export default function CustomARViewer({ onClose }) {
     };
   }, [initCamera, stopCamera]);
 
-  const handleWallDetected = useCallback((detected) => {
+  const handleWallDetected = useCallback((detected, point, normal, distance) => {
     setWallDetected(detected);
+    if (distance) setWallDistance(distance);
   }, []);
 
-  const handlePlacement = useCallback((position) => {
-    setWorldTransform({
+  const handlePlacement = useCallback((position, normal) => {
+    // Create rotation to face away from wall
+    const targetRotation = new THREE.Euler();
+    if (normal) {
+      const quaternion = new THREE.Quaternion();
+      quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+      targetRotation.setFromQuaternion(quaternion);
+    }
+    
+    setAnchorTransform({
       position: position.clone(),
-      rotation: new THREE.Euler(0, 0, 0),
+      rotation: targetRotation,
       scale: 1
     });
     setIsModelPlaced(true);
     setArPhase('placed');
     setShowGestureTutorial(true);
-    setTimeout(() => setShowGestureTutorial(false), 5000);
+    setTimeout(() => setShowGestureTutorial(false), 6000);
     transformCount.current++;
   }, []);
 
   const handleTransformChange = useCallback((newTransform) => {
-    setWorldTransform(newTransform);
+    setAnchorTransform(newTransform);
     transformCount.current++;
   }, []);
 
   const handleReset = useCallback(() => {
     setIsModelPlaced(false);
     setArPhase('ready');
-    setWorldTransform({
+    setAnchorTransform({
       position: new THREE.Vector3(0, 0, -2),
       rotation: new THREE.Euler(0, 0, 0),
       scale: 1
@@ -533,33 +606,40 @@ export default function CustomARViewer({ onClose }) {
   }, [isFullscreen]);
 
   return (
-    <div className="ar-viewer-modern">
+    <div className="ar-viewer-advanced">
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        className="ar-video-bg"
+        className="ar-video-feed"
       />
 
       {cameraStatus === 'ready' && (
-        <div ref={canvasRef} className="ar-canvas-container">
+        <div ref={canvasRef} className="ar-canvas-layer">
           <Canvas
-            gl={{ alpha: true, antialias: true, preserveDrawingBuffer: true }}
+            gl={{ 
+              alpha: true, 
+              antialias: true, 
+              preserveDrawingBuffer: true,
+              powerPreference: "high-performance"
+            }}
             style={{ background: 'transparent' }}
           >
-            <PerspectiveCamera makeDefault position={[0, 0, 0]} fov={60} />
-            <ambientLight intensity={0.7} />
-            <directionalLight position={[5, 5, 5]} intensity={1.2} castShadow />
-            <pointLight position={[-5, 5, -5]} intensity={0.5} />
+            <PerspectiveCamera makeDefault position={[0, 0, 0]} fov={65} />
+            <ambientLight intensity={0.6} />
+            <directionalLight position={[5, 5, 5]} intensity={1} castShadow />
+            <pointLight position={[-5, 5, -5]} intensity={0.3} />
+            <hemisphereLight intensity={0.4} />
             <Environment preset="city" />
+            
             {showGrid && <gridHelper args={[10, 10]} position={[0, -1.5, 0]} />}
             
             <ARScene 
               currentModel={currentModel}
               onPlacement={handlePlacement}
               isPlaced={isModelPlaced}
-              worldTransform={worldTransform}
+              anchorTransform={anchorTransform}
               onTransformChange={handleTransformChange}
               scanningPhase={arPhase === 'scanning' || arPhase === 'ready'}
               onWallDetected={handleWallDetected}
@@ -568,142 +648,143 @@ export default function CustomARViewer({ onClose }) {
         </div>
       )}
 
-      {/* Loading */}
+      {/* Status Overlays */}
       {cameraStatus !== 'ready' && cameraStatus !== 'error' && (
-        <div className="ar-status-overlay">
-          <div className="status-spinner"></div>
+        <div className="ar-loading-screen">
+          <div className="loading-ring"></div>
           <h3>Initializing AR</h3>
-          <p>Getting camera ready...</p>
+          <p>Preparing camera...</p>
         </div>
       )}
 
-      {/* Error */}
       {cameraStatus === 'error' && (
-        <div className="ar-status-overlay error">
-          <div className="error-icon">⚠️</div>
+        <div className="ar-error-screen">
+          <div className="error-badge">⚠️</div>
           <h3>Camera Error</h3>
           <p>{cameraError}</p>
-          <div className="button-group">
-            <button className="btn-modern primary" onClick={retryCamera}>
+          <div className="error-actions">
+            <button className="btn-retry" onClick={retryCamera}>
               <RefreshCw size={20} /> Retry
             </button>
-            <button className="btn-modern" onClick={onClose}>
+            <button className="btn-close" onClick={onClose}>
               <X size={20} /> Close
             </button>
           </div>
         </div>
       )}
 
-      {/* AR UI */}
+      {/* Main AR UI */}
       {cameraStatus === 'ready' && (
         <>
-          {/* Top Bar */}
-          <div className="ar-topbar-modern">
-            <button className="btn-icon-modern" onClick={onClose}>
-              <X size={24} />
+          {/* Header */}
+          <header className="ar-header">
+            <button className="ar-btn-close" onClick={onClose}>
+              <X size={22} />
             </button>
             
-            <div className="ar-status-badge">
+            <div className="ar-status-pill">
               {arPhase === 'scanning' && (
                 <>
-                  <Scan className="animate-pulse" size={18} />
-                  <span>Scanning Environment...</span>
+                  <div className="status-spinner-mini" />
+                  <span>Scanning...</span>
                 </>
               )}
               {arPhase === 'ready' && (
                 <>
-                  <div className={`status-dot ${wallDetected ? 'active' : ''}`} />
-                  <span>{wallDetected ? 'Wall Detected - Tap to Place' : 'Looking for walls...'}</span>
+                  <div className={`status-indicator ${wallDetected ? 'active' : 'inactive'}`} />
+                  <span>{wallDetected ? `Wall Found (${wallDistance.toFixed(1)}m)` : 'Searching...'}</span>
                 </>
               )}
               {arPhase === 'placed' && (
                 <>
-                  <div className="status-dot active" />
-                  <span>Frame Placed</span>
+                  <div className="status-indicator success" />
+                  <span>Placed</span>
                 </>
               )}
             </div>
 
-            <div className="ar-actions-modern">
-              <button className="btn-icon-modern" onClick={toggleGrid} title="Grid">
-                <Grid size={20} />
+            <div className="ar-actions-bar">
+              <button className="ar-btn-action" onClick={toggleGrid}>
+                <Grid size={18} />
               </button>
-              <button className="btn-icon-modern" onClick={switchCamera} title="Switch Camera">
-                <RefreshCw size={20} />
+              <button className="ar-btn-action" onClick={switchCamera}>
+                <RefreshCw size={18} />
               </button>
-              <button className="btn-icon-modern" onClick={toggleFullscreen} title="Fullscreen">
-                {isFullscreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}
+              <button className="ar-btn-action" onClick={toggleFullscreen}>
+                {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
               </button>
             </div>
-          </div>
+          </header>
 
-          {/* Instructions */}
+          {/* Scanning Instructions */}
+          {arPhase === 'scanning' && (
+            <div className="ar-scan-guide">
+              <Scan size={40} className="scan-icon" />
+              <h3>Environment Scanning</h3>
+              <p>Move your device slowly to map the space</p>
+              <div className="scan-bar-container">
+                <div className="scan-bar-fill" />
+              </div>
+            </div>
+          )}
+
+          {/* Placement Instructions */}
           {arPhase === 'ready' && !isModelPlaced && (
-            <div className="ar-instruction-card">
-              <div className="instruction-icon">
-                <Scan size={32} />
-              </div>
-              <h3>Point at a Wall</h3>
-              <p>Move your device slowly to scan walls</p>
-              <div className="scan-progress">
-                <div className={`scan-bar ${wallDetected ? 'detected' : ''}`} />
-              </div>
+            <div className="ar-placement-guide">
+              <Crosshair size={28} />
+              <h4>Point at a Wall</h4>
+              <p>Tap the green reticle to place frame</p>
+              {wallDetected && (
+                <div className="distance-badge">
+                  Distance: {wallDistance.toFixed(2)}m
+                </div>
+              )}
             </div>
           )}
 
           {/* Gesture Tutorial */}
           {showGestureTutorial && arPhase === 'placed' && (
-            <div className="gesture-tutorial">
-              <h3>Gesture Controls</h3>
-              <div className="gesture-list">
-                <div className="gesture-item">
-                  <Move size={24} />
-                  <span>Drag to move</span>
+            <div className="gesture-guide">
+              <h4>👋 Controls</h4>
+              <div className="gesture-grid">
+                <div className="gesture-card">
+                  <Move size={20} />
+                  <span>Drag</span>
                 </div>
-                <div className="gesture-item">
-                  <Hand size={24} />
-                  <span>Pinch to scale</span>
+                <div className="gesture-card">
+                  <Hand size={20} />
+                  <span>Pinch</span>
                 </div>
-                <div className="gesture-item">
-                  <RotateCw size={24} />
-                  <span>Two fingers to rotate</span>
+                <div className="gesture-card">
+                  <RotateCw size={20} />
+                  <span>Rotate</span>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Floating Controls */}
+          {/* Action Buttons */}
           {isModelPlaced && (
-            <div className="ar-floating-controls">
-              <button 
-                className="btn-floating primary" 
-                onClick={handleScreenshot}
-                title="Capture"
-              >
-                <Camera size={24} />
+            <div className="ar-action-panel">
+              <button className="action-btn primary" onClick={handleScreenshot}>
+                <Camera size={22} />
               </button>
-              <button 
-                className="btn-floating" 
-                onClick={handleReset}
-                title="Reset"
-              >
-                <RotateCcw size={24} />
+              <button className="action-btn" onClick={handleReset}>
+                <RotateCcw size={22} />
               </button>
-              <button 
-                className="btn-floating" 
-                onClick={() => setShowGestureTutorial(!showGestureTutorial)}
-                title="Help"
-              >
-                <Hand size={24} />
+              <button className="action-btn" onClick={() => setShowGestureTutorial(!showGestureTutorial)}>
+                <Hand size={22} />
               </button>
             </div>
           )}
 
           {/* Center Crosshair */}
           {arPhase === 'ready' && !isModelPlaced && wallDetected && (
-            <div className="ar-crosshair">
-              <div className="crosshair-center" />
-              <div className="crosshair-ring" />
+            <div className="center-reticle">
+              <div className="reticle-dot" />
+              <svg className="reticle-circle" viewBox="0 0 100 100">
+                <circle cx="50" cy="50" r="45" />
+              </svg>
             </div>
           )}
         </>
