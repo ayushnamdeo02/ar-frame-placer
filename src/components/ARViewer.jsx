@@ -1,11 +1,11 @@
 /* eslint-disable no-unused-vars */
 import React, { useEffect, useRef, useState, useCallback, Suspense } from 'react';
-import { Canvas, useFrame, useThree, extend } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Environment, useGLTF, PerspectiveCamera } from '@react-three/drei';
 import * as THREE from 'three';
 import { 
-  X, Camera, RotateCcw, RefreshCw, Maximize2,
-  AlertTriangle, CheckCircle, Zap, Crosshair, Move
+  X, Camera, RotateCcw, RefreshCw, Crosshair,
+  AlertTriangle, CheckCircle, Move, Zap
 } from 'lucide-react';
 
 import useARStore from '../store/useARStore';
@@ -13,28 +13,27 @@ import analytics from '../services/analytics';
 
 /**
  * ============================================================================
- * ADVANCED WALL DETECTION - IMPROVED ALGORITHM
+ * PLANE SURFACE DETECTOR - Works without corners
+ * Detects any flat surface (wall/floor/ceiling)
  * ============================================================================
  */
-class AdvancedWallDetector {
+class PlaneSurfaceDetector {
   constructor() {
     this.canvas = document.createElement('canvas');
     this.ctx = this.canvas.getContext('2d');
     this.history = [];
-    this.debugMode = true;
   }
 
   async analyzeFrame(video) {
     if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) {
       return { 
-        isWall: false, 
+        isPlane: false, 
         confidence: 0, 
-        reason: 'Initializing camera...', 
+        reason: 'Camera starting...', 
         surfaceType: 'unknown' 
       };
     }
 
-    // Use higher resolution for better accuracy
     this.canvas.width = 480;
     this.canvas.height = 360;
     this.ctx.drawImage(video, 0, 0, this.canvas.width, this.canvas.height);
@@ -44,126 +43,147 @@ class AdvancedWallDetector {
     const width = this.canvas.width;
     const height = this.canvas.height;
 
-    // Multi-region analysis for better accuracy
-    const regions = this.analyzeRegions(data, width, height);
-    const edges = this.detectEdges(data, width, height);
-    const orientation = this.detectOrientation(data, width, height);
+    // Analyze entire visible surface
+    const surface = this.analyzeSurface(data, width, height);
     const texture = this.analyzeTexture(data, width, height);
-    const depth = this.estimateDepth(data, width, height);
+    const orientation = this.detectOrientation(data, width, height);
+    const lighting = this.analyzeLighting(data, width, height);
 
-    // Decision engine
-    const result = this.evaluateWallConfidence(regions, edges, orientation, texture, depth);
+    // Evaluate if it's a usable plane
+    const result = this.evaluatePlane(surface, texture, orientation, lighting);
 
-    // Temporal filtering
+    // Temporal smoothing
     this.history.push(result);
-    if (this.history.length > 12) this.history.shift();
+    if (this.history.length > 10) this.history.shift();
 
-    const smoothed = this.temporalSmoothing();
-
-    if (this.debugMode) {
-      console.log('🔍 Wall Detection:', {
-        surface: smoothed.surfaceType,
-        conf: (smoothed.confidence * 100).toFixed(0) + '%',
-        reason: smoothed.reason,
-        frames: this.history.filter(h => h.isWall).length + '/12'
-      });
-    }
-
-    return smoothed;
+    return this.smoothResults();
   }
 
-  analyzeRegions(data, width, height) {
-    const regions = {
-      center: this.analyzeRegion(data, width, height, 0.3, 0.7, 0.3, 0.7),
-      top: this.analyzeRegion(data, width, height, 0.2, 0.8, 0.1, 0.3),
-      bottom: this.analyzeRegion(data, width, height, 0.2, 0.8, 0.7, 0.9),
-      left: this.analyzeRegion(data, width, height, 0.1, 0.3, 0.3, 0.7),
-      right: this.analyzeRegion(data, width, height, 0.7, 0.9, 0.3, 0.7)
-    };
+  analyzeSurface(data, width, height) {
+    // Divide into 3x3 grid to analyze uniformity across entire surface
+    const gridSize = 3;
+    const cellWidth = Math.floor(width / gridSize);
+    const cellHeight = Math.floor(height / gridSize);
+    const cells = [];
 
-    return regions;
-  }
+    for (let gy = 0; gy < gridSize; gy++) {
+      for (let gx = 0; gx < gridSize; gx++) {
+        const startX = gx * cellWidth;
+        const startY = gy * cellHeight;
+        const endX = Math.min(startX + cellWidth, width);
+        const endY = Math.min(startY + cellHeight, height);
 
-  analyzeRegion(data, width, height, x1, x2, y1, y2) {
-    const startX = Math.floor(width * x1);
-    const endX = Math.floor(width * x2);
-    const startY = Math.floor(height * y1);
-    const endY = Math.floor(height * y2);
+        let brightSum = 0, satSum = 0, count = 0;
+        const values = [];
 
-    let brightSum = 0, satSum = 0, count = 0;
-    const values = [];
+        for (let y = startY; y < endY; y++) {
+          for (let x = startX; x < endX; x++) {
+            const idx = (y * width + x) * 4;
+            const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+            
+            const bright = (r + g + b) / 3;
+            const max = Math.max(r, g, b);
+            const min = Math.min(r, g, b);
+            const sat = max === 0 ? 0 : (max - min) / max;
+            
+            brightSum += bright;
+            satSum += sat;
+            values.push(bright);
+            count++;
+          }
+        }
 
-    for (let y = startY; y < endY; y++) {
-      for (let x = startX; x < endX; x++) {
-        const idx = (y * width + x) * 4;
-        const r = data[idx], g = data[idx + 1], b = data[idx + 2];
-        
-        const bright = (r + g + b) / 3;
-        const max = Math.max(r, g, b);
-        const min = Math.min(r, g, b);
-        const sat = max === 0 ? 0 : (max - min) / max;
-        
-        brightSum += bright;
-        satSum += sat;
-        values.push(bright);
-        count++;
+        const avgBright = brightSum / count;
+        const avgSat = satSum / count;
+
+        // Calculate variance within cell
+        let variance = 0;
+        values.forEach(v => variance += Math.pow(v - avgBright, 2));
+        variance = Math.sqrt(variance / count);
+
+        cells.push({
+          avgBright,
+          avgSat,
+          variance,
+          uniformity: Math.max(0, 1 - variance / 70)
+        });
       }
     }
 
-    const avgBright = brightSum / count;
-    const avgSat = satSum / count;
+    // Calculate overall uniformity across cells
+    const avgBrightness = cells.reduce((sum, c) => sum + c.avgBright, 0) / cells.length;
+    const avgSaturation = cells.reduce((sum, c) => sum + c.avgSat, 0) / cells.length;
+    const avgUniformity = cells.reduce((sum, c) => sum + c.uniformity, 0) / cells.length;
 
-    // Calculate variance (uniformity)
-    let variance = 0;
-    values.forEach(v => variance += Math.pow(v - avgBright, 2));
-    variance = Math.sqrt(variance / count);
-    const uniformity = Math.max(0, 1 - variance / 80);
-
-    return { avgBright, avgSat, uniformity, variance };
-  }
-
-  detectEdges(data, width, height) {
-    let strongEdges = 0, weakEdges = 0, totalPixels = 0;
-
-    for (let y = 2; y < height - 2; y++) {
-      for (let x = 2; x < width - 2; x++) {
-        const idx = (y * width + x) * 4;
-        
-        // Sobel operator
-        const gx = 
-          -data[((y-1) * width + (x-1)) * 4] + data[((y-1) * width + (x+1)) * 4] +
-          -2 * data[(y * width + (x-1)) * 4] + 2 * data[(y * width + (x+1)) * 4] +
-          -data[((y+1) * width + (x-1)) * 4] + data[((y+1) * width + (x+1)) * 4];
-        
-        const gy = 
-          -data[((y-1) * width + (x-1)) * 4] - 2 * data[((y-1) * width + x) * 4] - data[((y-1) * width + (x+1)) * 4] +
-          data[((y+1) * width + (x-1)) * 4] + 2 * data[((y+1) * width + x) * 4] + data[((y+1) * width + (x+1)) * 4];
-        
-        const magnitude = Math.sqrt(gx * gx + gy * gy);
-        
-        if (magnitude > 80) strongEdges++;
-        else if (magnitude > 40) weakEdges++;
-        totalPixels++;
-      }
-    }
+    // Check brightness consistency across cells
+    let brightnessVariance = 0;
+    cells.forEach(c => brightnessVariance += Math.pow(c.avgBright - avgBrightness, 2));
+    brightnessVariance = Math.sqrt(brightnessVariance / cells.length);
+    const crossCellUniformity = Math.max(0, 1 - brightnessVariance / 60);
 
     return {
-      strongDensity: strongEdges / totalPixels,
-      weakDensity: weakEdges / totalPixels,
-      totalDensity: (strongEdges + weakEdges) / totalPixels
+      avgBrightness,
+      avgSaturation,
+      avgUniformity,
+      crossCellUniformity,
+      cells
+    };
+  }
+
+  analyzeTexture(data, width, height) {
+    // Sample multiple regions to detect texture patterns
+    let totalTexture = 0;
+    let edgeCount = 0;
+    let sampleCount = 0;
+
+    // Sample 5x5 grid
+    for (let sy = 0; sy < 5; sy++) {
+      for (let sx = 0; sx < 5; sx++) {
+        const x = Math.floor(width * (0.1 + sx * 0.16));
+        const y = Math.floor(height * (0.1 + sy * 0.16));
+
+        if (x > 0 && x < width - 1 && y > 0 && y < height - 1) {
+          const idx = (y * width + x) * 4;
+          const center = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+          
+          // Get neighbors
+          const top = (data[((y-1) * width + x) * 4] + data[((y-1) * width + x) * 4 + 1] + data[((y-1) * width + x) * 4 + 2]) / 3;
+          const bottom = (data[((y+1) * width + x) * 4] + data[((y+1) * width + x) * 4 + 1] + data[((y+1) * width + x) * 4 + 2]) / 3;
+          const left = (data[(y * width + (x-1)) * 4] + data[(y * width + (x-1)) * 4 + 1] + data[(y * width + (x-1)) * 4 + 2]) / 3;
+          const right = (data[(y * width + (x+1)) * 4] + data[(y * width + (x+1)) * 4 + 1] + data[(y * width + (x+1)) * 4 + 2]) / 3;
+          
+          // Laplacian (texture measure)
+          const laplacian = Math.abs(4 * center - top - bottom - left - right);
+          totalTexture += laplacian;
+          
+          // Edge detection
+          if (laplacian > 40) edgeCount++;
+          sampleCount++;
+        }
+      }
+    }
+
+    const avgTexture = totalTexture / sampleCount;
+    const edgeDensity = edgeCount / sampleCount;
+    const textureSmoothness = Math.max(0, 1 - avgTexture / 35);
+
+    return {
+      avgTexture,
+      edgeDensity,
+      textureSmoothness
     };
   }
 
   detectOrientation(data, width, height) {
-    // Sample multiple horizontal strips
-    const strips = 8;
+    // Analyze brightness gradient from top to bottom
+    const strips = 6;
     const stripBrightness = [];
     
     for (let s = 0; s < strips; s++) {
       const y = Math.floor((height / strips) * s + height / (strips * 2));
       let brightness = 0, count = 0;
       
-      for (let x = Math.floor(width * 0.25); x < Math.floor(width * 0.75); x++) {
+      for (let x = Math.floor(width * 0.2); x < Math.floor(width * 0.8); x++) {
         const idx = (y * width + x) * 4;
         brightness += (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
         count++;
@@ -172,249 +192,167 @@ class AdvancedWallDetector {
       stripBrightness.push(brightness / count);
     }
 
-    const topAvg = (stripBrightness[0] + stripBrightness[1] + stripBrightness[2]) / 3;
-    const bottomAvg = (stripBrightness[5] + stripBrightness[6] + stripBrightness[7]) / 3;
+    const topAvg = (stripBrightness[0] + stripBrightness[1]) / 2;
+    const bottomAvg = (stripBrightness[4] + stripBrightness[5]) / 2;
     const gradient = bottomAvg - topAvg;
 
     let orientation = 'wall';
-    if (gradient > 45) orientation = 'floor';
-    else if (gradient < -45) orientation = 'ceiling';
+    let orientationConfidence = 1;
 
-    return { orientation, gradient, stripBrightness };
+    if (gradient > 40) {
+      orientation = 'floor';
+      orientationConfidence = Math.min(1, gradient / 80);
+    } else if (gradient < -40) {
+      orientation = 'ceiling';
+      orientationConfidence = Math.min(1, Math.abs(gradient) / 80);
+    } else {
+      orientationConfidence = Math.max(0, 1 - Math.abs(gradient) / 40);
+    }
+
+    return { 
+      orientation, 
+      gradient, 
+      orientationConfidence,
+      stripBrightness 
+    };
   }
 
-  analyzeTexture(data, width, height) {
-    const startX = Math.floor(width * 0.3);
-    const endX = Math.floor(width * 0.7);
-    const startY = Math.floor(height * 0.3);
-    const endY = Math.floor(height * 0.7);
+  analyzeLighting(data, width, height) {
+    // Check for overexposure, underexposure, and uniformity
+    let overexposed = 0;
+    let underexposed = 0;
+    let wellLit = 0;
+    let total = 0;
 
-    let textureSum = 0, count = 0;
-
-    for (let y = startY + 1; y < endY - 1; y++) {
-      for (let x = startX + 1; x < endX - 1; x++) {
+    for (let y = 0; y < height; y += 4) {
+      for (let x = 0; x < width; x += 4) {
         const idx = (y * width + x) * 4;
-        const center = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+        const bright = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
         
-        // Calculate Laplacian (texture measure)
-        const top = (data[((y-1) * width + x) * 4] + data[((y-1) * width + x) * 4 + 1] + data[((y-1) * width + x) * 4 + 2]) / 3;
-        const bottom = (data[((y+1) * width + x) * 4] + data[((y+1) * width + x) * 4 + 1] + data[((y+1) * width + x) * 4 + 2]) / 3;
-        const left = (data[(y * width + (x-1)) * 4] + data[(y * width + (x-1)) * 4 + 1] + data[(y * width + (x-1)) * 4 + 2]) / 3;
-        const right = (data[(y * width + (x+1)) * 4] + data[(y * width + (x+1)) * 4 + 1] + data[(y * width + (x+1)) * 4 + 2]) / 3;
-        
-        const laplacian = Math.abs(4 * center - top - bottom - left - right);
-        textureSum += laplacian;
-        count++;
+        if (bright > 240) overexposed++;
+        else if (bright < 15) underexposed++;
+        else wellLit++;
+        total++;
       }
     }
 
-    const avgTexture = textureSum / count;
-    const textureScore = Math.min(avgTexture / 30, 1);
+    const overexposureRatio = overexposed / total;
+    const underexposureRatio = underexposed / total;
+    const wellLitRatio = wellLit / total;
 
-    return { avgTexture, textureScore };
+    return {
+      overexposureRatio,
+      underexposureRatio,
+      wellLitRatio,
+      isGoodLighting: wellLitRatio > 0.7
+    };
   }
 
-  estimateDepth(data, width, height) {
-    const center = this.analyzeRegion(data, width, height, 0.4, 0.6, 0.4, 0.6);
-    
-    // Depth heuristic: bright + low saturation = far (wall)
-    const depthScore = (center.avgBright / 255) * 0.6 + (1 - center.avgSat) * 0.4;
-    
-    return { depthScore, brightness: center.avgBright, saturation: center.avgSat };
-  }
-
-  evaluateWallConfidence(regions, edges, orientation, texture, depth) {
-    let isWall = false;
+  evaluatePlane(surface, texture, orientation, lighting) {
+    let isPlane = false;
     let confidence = 0;
     let reason = '';
     let surfaceType = 'unknown';
 
-    const bright = regions.center.avgBright;
-    const uniformity = regions.center.uniformity;
-    const edgeDensity = edges.totalDensity;
-    const texScore = texture.textureScore;
-    const grad = orientation.gradient;
-
-    // Rule-based classification
-    if (bright > 240) {
-      surfaceType = 'window';
-      reason = '🪟 Window/Sky - too bright';
+    // Lighting checks first
+    if (lighting.overexposureRatio > 0.4) {
+      surfaceType = 'overexposed';
+      reason = '☀️ Too bright - move away from light';
       confidence = 0.05;
     }
-    else if (bright < 20) {
-      surfaceType = 'dark';
-      reason = '🌑 Too dark - need light';
+    else if (lighting.underexposureRatio > 0.5) {
+      surfaceType = 'underexposed';
+      reason = '🌑 Too dark - need more light';
       confidence = 0.05;
     }
-    else if (grad > 50) {
+    // Orientation checks
+    else if (orientation.orientation === 'floor' && orientation.orientationConfidence > 0.6) {
       surfaceType = 'floor';
-      reason = '⬇️ Floor detected - aim higher';
-      confidence = 0.08;
+      reason = '⬇️ Floor - aim at wall (or tap to place on floor)';
+      confidence = 0.5; // Allow floor placement
+      isPlane = true; // Floor is still a plane!
     }
-    else if (grad < -50) {
+    else if (orientation.orientation === 'ceiling' && orientation.orientationConfidence > 0.6) {
       surfaceType = 'ceiling';
-      reason = '⬆️ Ceiling detected - aim lower';
-      confidence = 0.08;
+      reason = '⬆️ Ceiling - aim lower';
+      confidence = 0.3;
     }
-    else if (edgeDensity > 0.25) {
-      surfaceType = 'textured';
-      reason = '🎨 Too textured - find plain wall';
-      confidence = 0.12;
-    }
-    else if (texScore > 0.7) {
-      surfaceType = 'pattern';
-      reason = '🔲 Pattern detected - find plain area';
+    // Texture checks
+    else if (texture.edgeDensity > 0.3) {
+      surfaceType = 'busy';
+      reason = '🎨 Too much detail - find plain surface';
       confidence = 0.15;
     }
+    // Main plane detection - RELAXED REQUIREMENTS
     else if (
-      uniformity > 0.62 &&
-      edgeDensity < 0.18 &&
-      texScore < 0.6 &&
-      regions.center.avgSat < 0.45 &&
-      bright > 30 && bright < 235 &&
-      Math.abs(grad) < 45
+      surface.avgUniformity > 0.55 &&           // Relaxed from 0.62
+      surface.crossCellUniformity > 0.50 &&     // Relaxed from 0.60
+      texture.textureSmoothness > 0.55 &&       // Relaxed from 0.65
+      surface.avgSaturation < 0.5 &&            // Relaxed from 0.45
+      surface.avgBrightness > 25 &&
+      surface.avgBrightness < 235 &&
+      lighting.wellLitRatio > 0.6                // Relaxed from 0.7
     ) {
-      isWall = true;
-      surfaceType = 'wall';
+      isPlane = true;
+      surfaceType = orientation.orientation === 'floor' ? 'floor' : 'wall';
       
-      // Calculate confidence score
       confidence = Math.min(0.98,
-        uniformity * 0.30 +
-        (1 - edgeDensity * 5.5) * 0.25 +
-        (1 - texScore) * 0.20 +
-        (1 - regions.center.avgSat) * 0.15 +
-        (1 - Math.abs(grad) / 90) * 0.10
+        surface.avgUniformity * 0.25 +
+        surface.crossCellUniformity * 0.25 +
+        texture.textureSmoothness * 0.20 +
+        (1 - surface.avgSaturation) * 0.15 +
+        lighting.wellLitRatio * 0.15
       );
       
-      reason = '✅ Wall detected';
+      reason = surfaceType === 'floor' 
+        ? '✅ Floor detected - tap to place'
+        : '✅ Wall detected - tap to place';
     }
     else {
       surfaceType = 'uncertain';
-      reason = '🔄 Move camera slowly';
+      reason = '🔄 Keep moving slowly';
       confidence = 0.25;
     }
 
-    return { isWall, confidence, surfaceType, reason };
+    return { 
+      isPlane, 
+      confidence, 
+      surfaceType, 
+      reason,
+      metrics: {
+        uniformity: surface.avgUniformity.toFixed(2),
+        brightness: surface.avgBrightness.toFixed(0),
+        texture: texture.textureSmoothness.toFixed(2),
+        lighting: lighting.wellLitRatio.toFixed(2)
+      }
+    };
   }
 
-  temporalSmoothing() {
-    const recentWalls = this.history.filter(h => h.isWall).length;
-    const threshold = 8; // Need 8/12 frames
+  smoothResults() {
+    const recentPlanes = this.history.filter(h => h.isPlane).length;
+    const threshold = 7; // Need 7/10 frames
 
-    if (recentWalls >= threshold) {
-      const wallFrames = this.history.filter(h => h.isWall);
-      const avgConf = wallFrames.reduce((sum, h) => sum + h.confidence, 0) / wallFrames.length;
+    if (recentPlanes >= threshold) {
+      const planeFrames = this.history.filter(h => h.isPlane);
+      const avgConf = planeFrames.reduce((sum, h) => sum + h.confidence, 0) / planeFrames.length;
+      const mostCommonType = planeFrames[planeFrames.length - 1].surfaceType;
       
       return {
-        isWall: true,
+        isPlane: true,
         confidence: avgConf,
-        surfaceType: 'wall',
-        reason: `✓ Wall confirmed (${recentWalls}/12)`,
-        stable: true
+        surfaceType: mostCommonType,
+        reason: `✓ ${mostCommonType.toUpperCase()} confirmed (${recentPlanes}/10)`,
+        stable: true,
+        metrics: planeFrames[planeFrames.length - 1].metrics
       };
     }
 
-    // Return most recent result
     const latest = this.history[this.history.length - 1];
     return { ...latest, stable: false };
   }
 
   reset() {
     this.history = [];
-  }
-}
-
-/**
- * ============================================================================
- * WEBXR NATIVE AR MANAGER
- * ============================================================================
- */
-class WebXRManager {
-  constructor() {
-    this.session = null;
-    this.supported = false;
-    this.hitTestSource = null;
-    this.referenceSpace = null;
-  }
-
-  async checkSupport() {
-    if (!navigator.xr) {
-      console.log('❌ WebXR not available');
-      return false;
-    }
-
-    try {
-      this.supported = await navigator.xr.isSessionSupported('immersive-ar');
-      console.log('✅ WebXR AR support:', this.supported);
-      return this.supported;
-    } catch (error) {
-      console.error('WebXR check failed:', error);
-      return false;
-    }
-  }
-
-  async startSession(gl) {
-    if (!this.supported) return false;
-
-    try {
-      this.session = await navigator.xr.requestSession('immersive-ar', {
-        requiredFeatures: ['hit-test'],
-        optionalFeatures: ['dom-overlay', 'light-estimation', 'anchors']
-      });
-
-      gl.xr.setSession(this.session);
-      
-      this.referenceSpace = await this.session.requestReferenceSpace('local');
-      const viewerSpace = await this.session.requestReferenceSpace('viewer');
-      this.hitTestSource = await this.session.requestHitTestSource({ space: viewerSpace });
-
-      console.log('✅ WebXR session started');
-      
-      this.session.addEventListener('end', () => {
-        this.cleanup();
-      });
-
-      return true;
-    } catch (error) {
-      console.error('WebXR session failed:', error);
-      return false;
-    }
-  }
-
-  getHitTestResults(frame) {
-    if (!this.hitTestSource || !frame) return null;
-
-    try {
-      const hitTestResults = frame.getHitTestResults(this.hitTestSource);
-      if (hitTestResults.length > 0) {
-        const hit = hitTestResults[0];
-        const pose = hit.getPose(this.referenceSpace);
-        
-        if (pose) {
-          return {
-            position: new THREE.Vector3().copy(pose.transform.position),
-            orientation: new THREE.Quaternion().copy(pose.transform.orientation)
-          };
-        }
-      }
-    } catch (error) {
-      console.error('Hit test error:', error);
-    }
-
-    return null;
-  }
-
-  cleanup() {
-    this.hitTestSource = null;
-    this.referenceSpace = null;
-    this.session = null;
-    console.log('WebXR session ended');
-  }
-
-  endSession() {
-    if (this.session) {
-      this.session.end();
-    }
   }
 }
 
@@ -439,7 +377,10 @@ class WorldAnchor {
     this.worldRot = rotation.clone();
     this.scale = 1;
 
-    console.log('🎯 Anchor placed at:', position.toArray().map(v => v.toFixed(2)));
+    console.log('🎯 Anchor placed:', {
+      position: position.toArray().map(v => v.toFixed(2)),
+      rotation: rotation.toArray().map(v => v.toFixed(2))
+    });
   }
 
   getTransform(camera) {
@@ -477,7 +418,7 @@ class WorldAnchor {
 
 /**
  * ============================================================================
- * GESTURE CONTROLS
+ * GESTURE CONTROLLER
  * ============================================================================
  */
 class GestureController {
@@ -495,11 +436,7 @@ class GestureController {
     };
 
     if (touches.length === 1) {
-      this.state = { 
-        type: 'drag', 
-        x: touches[0].clientX, 
-        y: touches[0].clientY 
-      };
+      this.state = { type: 'drag', x: touches[0].clientX, y: touches[0].clientY };
     } else if (touches.length === 2) {
       const dx = touches[1].clientX - touches[0].clientX;
       const dy = touches[1].clientY - touches[0].clientY;
@@ -537,10 +474,7 @@ class GestureController {
       const newScale = Math.max(0.2, Math.min(5, this.base.scale * scaleRatio));
 
       const angleDelta = angle - this.state.angle;
-      const rotQuat = new THREE.Quaternion().setFromAxisAngle(
-        new THREE.Vector3(0, 0, 1), 
-        angleDelta
-      );
+      const rotQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), angleDelta);
       const newRot = this.base.rotation.clone().multiply(rotQuat);
 
       this.onChange({ position: this.base.position, rotation: newRot, scale: newScale });
@@ -577,40 +511,19 @@ function Reticle({ position, isGood, visible }) {
   
   return (
     <group position={position} ref={ref}>
-      {/* Center dot */}
       <mesh renderOrder={1000}>
         <circleGeometry args={[size, 32]} />
-        <meshBasicMaterial 
-          color={color} 
-          transparent 
-          opacity={1} 
-          depthTest={false} 
-        />
+        <meshBasicMaterial color={color} transparent opacity={1} depthTest={false} />
       </mesh>
-      
-      {/* Ring */}
       <mesh renderOrder={999}>
         <ringGeometry args={[0.08, 0.09, 32]} />
-        <meshBasicMaterial 
-          color={color} 
-          transparent 
-          opacity={isGood ? 1 : 0.7} 
-          side={THREE.DoubleSide} 
-          depthTest={false} 
-        />
+        <meshBasicMaterial color={color} transparent opacity={isGood ? 1 : 0.7} side={THREE.DoubleSide} depthTest={false} />
       </mesh>
-      
-      {/* Corner brackets */}
       {isGood && [0, 90, 180, 270].map((angle, i) => (
         <group key={i} rotation={[0, 0, (angle * Math.PI) / 180]}>
           <mesh position={[0.15, 0, 0]} renderOrder={998}>
             <planeGeometry args={[0.06, 0.012]} />
-            <meshBasicMaterial 
-              color={color} 
-              transparent 
-              opacity={1} 
-              depthTest={false} 
-            />
+            <meshBasicMaterial color={color} transparent opacity={1} depthTest={false} />
           </mesh>
         </group>
       ))}
@@ -623,18 +536,27 @@ function Model3D({ url, anchor, isPlaced, gestureTransform }) {
   const gltf = useGLTF(url);
   const [normalizedScale, setNormalizedScale] = useState(1);
   const { camera } = useThree();
+  const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
     if (gltf?.scene) {
       const box = new THREE.Box3().setFromObject(gltf.scene);
       const size = box.getSize(new THREE.Vector3());
       const maxDim = Math.max(size.x, size.y, size.z);
-      setNormalizedScale(0.6 / maxDim);
+      
+      const scale = 0.6 / maxDim;
+      setNormalizedScale(scale);
+      setIsReady(true);
+      
+      console.log('✅ Model loaded:', {
+        size: size.toArray().map(v => v.toFixed(2)),
+        scale: scale.toFixed(3)
+      });
     }
   }, [gltf]);
 
   useFrame(() => {
-    if (!ref.current || !isPlaced) return;
+    if (!ref.current || !isPlaced || !isReady) return;
 
     const transform = gestureTransform || anchor?.getTransform(camera);
     if (!transform) return;
@@ -642,9 +564,13 @@ function Model3D({ url, anchor, isPlaced, gestureTransform }) {
     ref.current.position.copy(transform.position);
     ref.current.quaternion.copy(transform.rotation);
     ref.current.scale.setScalar(transform.scale * normalizedScale);
+    ref.current.visible = true;
   });
 
-  if (!gltf?.scene) return null;
+  if (!gltf?.scene || !isReady) {
+    console.log('⏳ Loading model...');
+    return null;
+  }
 
   const scene = gltf.scene.clone(true);
   
@@ -652,34 +578,47 @@ function Model3D({ url, anchor, isPlaced, gestureTransform }) {
     if (child.isMesh) {
       child.castShadow = true;
       child.receiveShadow = true;
+      child.frustumCulled = false;
+      
       if (child.material) {
         child.material.side = THREE.DoubleSide;
+        child.material.transparent = false;
+        child.material.opacity = 1;
+        child.material.depthWrite = true;
+        child.material.depthTest = true;
         child.material.needsUpdate = true;
       }
     }
   });
 
-  // Center the model
   const box = new THREE.Box3().setFromObject(scene);
   const center = box.getCenter(new THREE.Vector3());
   scene.position.sub(center);
 
-  return <primitive ref={ref} object={scene} />;
+  console.log('🎨 Model ready to render');
+
+  return (
+    <group ref={ref}>
+      <primitive object={scene} />
+      {/* Debug marker */}
+      <mesh position={[0, 0, 0]}>
+        <sphereGeometry args={[0.02, 16, 16]} />
+        <meshBasicMaterial color="lime" />
+      </mesh>
+    </group>
+  );
 }
 
-function HitTestSystem({ onHit, active, useWebXR, webxrManager }) {
-  const { camera, scene, gl } = useThree();
+function HitTestSystem({ onHit, active }) {
+  const { camera, scene } = useThree();
   const raycaster = useRef(new THREE.Raycaster());
   const planes = useRef([]);
 
   useEffect(() => {
-    if (useWebXR) return; // Use WebXR hit testing instead
-
-    // Create virtual planes at different depths
-    const depths = [0.5, 0.8, 1.2, 1.6, 2.0, 2.5, 3.0, 4.0];
+    const depths = [0.5, 0.8, 1.0, 1.3, 1.6, 2.0, 2.5, 3.0, 4.0];
     const newPlanes = depths.map(d => {
       const plane = new THREE.Mesh(
-        new THREE.PlaneGeometry(15, 15),
+        new THREE.PlaneGeometry(20, 20),
         new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
       );
       plane.position.set(0, 0, -d);
@@ -690,36 +629,23 @@ function HitTestSystem({ onHit, active, useWebXR, webxrManager }) {
     
     planes.current = newPlanes;
     return () => newPlanes.forEach(p => scene.remove(p));
-  }, [scene, useWebXR]);
+  }, [scene]);
 
-  useFrame((state, delta, frame) => {
+  useFrame(() => {
     if (!active) return;
 
-    if (useWebXR && webxrManager && frame) {
-      // Use WebXR hit testing
-      const hitResult = webxrManager.getHitTestResults(frame);
-      if (hitResult) {
-        onHit({
-          point: hitResult.position,
-          normal: new THREE.Vector3(0, 1, 0), // Up normal from floor
-          distance: hitResult.position.length()
-        });
-      }
-    } else {
-      // Fallback raycasting
-      raycaster.current.setFromCamera(new THREE.Vector2(0, 0), camera);
-      const intersects = raycaster.current.intersectObjects(planes.current);
+    raycaster.current.setFromCamera(new THREE.Vector2(0, 0), camera);
+    const intersects = raycaster.current.intersectObjects(planes.current);
 
-      if (intersects.length > 0) {
-        const hit = intersects[0];
-        const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(camera.quaternion);
-        
-        onHit({
-          point: hit.point,
-          normal,
-          distance: hit.object.userData.depth
-        });
-      }
+    if (intersects.length > 0) {
+      const hit = intersects[0];
+      const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(camera.quaternion);
+      
+      onHit({
+        point: hit.point,
+        normal,
+        distance: hit.object.userData.depth
+      });
     }
   });
 
@@ -728,8 +654,7 @@ function HitTestSystem({ onHit, active, useWebXR, webxrManager }) {
 
 function ARScene({
   modelUrl, anchor, detector, onPlace, isPlaced,
-  scanning, onAnalysis, gestureTransform, gestureController,
-  useWebXR, webxrManager
+  scanning, onAnalysis, gestureTransform, gestureController
 }) {
   const { camera, gl } = useThree();
   const [hitData, setHitData] = useState(null);
@@ -737,9 +662,9 @@ function ARScene({
   const frame = useRef(0);
 
   useFrame(() => {
-    if (scanning && detector && !useWebXR) {
+    if (scanning && detector) {
       frame.current++;
-      if (frame.current % 2 === 0) { // Analyze every 2 frames
+      if (frame.current % 2 === 0) {
         const video = document.querySelector('.ar-video');
         detector.analyzeFrame(video).then(result => {
           setAnalysis(result);
@@ -753,12 +678,9 @@ function ARScene({
     e.preventDefault();
     
     if (e.type === 'touchstart') {
-      if (!isPlaced && analysis?.isWall && analysis?.confidence > 0.7 && hitData) {
+      if (!isPlaced && analysis?.isPlane && analysis?.confidence > 0.45 && hitData) {
         const rotation = new THREE.Quaternion();
-        rotation.setFromUnitVectors(
-          new THREE.Vector3(0, 0, 1), 
-          hitData.normal
-        );
+        rotation.setFromUnitVectors(new THREE.Vector3(0, 0, 1), hitData.normal);
         onPlace(hitData.point, rotation);
       } else if (isPlaced) {
         const transform = gestureTransform || anchor.getTransform(camera);
@@ -784,16 +706,11 @@ function ARScene({
     };
   }, [gl, handleTouch]);
 
-  const isGood = useWebXR ? !!hitData : (analysis?.isWall && analysis?.confidence > 0.7);
+  const isGood = analysis?.isPlane && analysis?.confidence > 0.45;
 
   return (
     <>
-      <HitTestSystem 
-        onHit={setHitData} 
-        active={scanning} 
-        useWebXR={useWebXR}
-        webxrManager={webxrManager}
-      />
+      <HitTestSystem onHit={setHitData} active={scanning} />
       
       <Reticle 
         position={hitData?.point || new THREE.Vector3(0, 0, -1.5)}
@@ -802,7 +719,12 @@ function ARScene({
       />
       
       {modelUrl && isPlaced && (
-        <Suspense fallback={null}>
+        <Suspense fallback={
+          <mesh position={hitData?.point || [0, 0, -1.5]}>
+            <boxGeometry args={[0.2, 0.2, 0.2]} />
+            <meshStandardMaterial color="cyan" wireframe />
+          </mesh>
+        }>
           <Model3D 
             url={modelUrl}
             anchor={anchor}
@@ -817,7 +739,7 @@ function ARScene({
 
 /**
  * ============================================================================
- * MAIN AR VIEWER COMPONENT
+ * MAIN COMPONENT
  * ============================================================================
  */
 export default function CustomARViewer({ onClose }) {
@@ -827,7 +749,6 @@ export default function CustomARViewer({ onClose }) {
   const anchorRef = useRef(null);
   const detectorRef = useRef(null);
   const gestureRef = useRef(null);
-  const webxrRef = useRef(null);
   const sessionStart = useRef(Date.now());
   const screenshots = useRef(0);
 
@@ -837,26 +758,20 @@ export default function CustomARViewer({ onClose }) {
   const [placed, setPlaced] = useState(false);
   const [analysis, setAnalysis] = useState(null);
   const [gestureTransform, setGestureTransform] = useState(null);
-  const [useWebXR, setUseWebXR] = useState(false);
 
   const { currentModel, modelType } = useARStore();
 
   useEffect(() => {
     anchorRef.current = new WorldAnchor();
-    detectorRef.current = new AdvancedWallDetector();
+    detectorRef.current = new PlaneSurfaceDetector();
     gestureRef.current = new GestureController((t) => {
       setGestureTransform(t);
       anchorRef.current?.update(t);
     });
-    webxrRef.current = new WebXRManager();
-
-    // Check WebXR support
-    webxrRef.current.checkSupport().then(supported => {
-      setUseWebXR(supported);
-    });
 
     console.log('✅ AR System initialized');
-  }, []);
+    console.log('📦 Model URL:', currentModel);
+  }, [currentModel]);
 
   const startCamera = useCallback(async () => {
     try {
@@ -887,7 +802,6 @@ export default function CustomARViewer({ onClose }) {
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach(t => t.stop());
-    webxrRef.current?.endSession();
   }, []);
 
   useEffect(() => {
@@ -908,7 +822,16 @@ export default function CustomARViewer({ onClose }) {
   const handlePlace = useCallback((position, rotation) => {
     const canvas = canvasRef.current?.querySelector('canvas');
     const camera = canvas?.__threeCamera;
-    if (!camera) return;
+    if (!camera) {
+      console.error('❌ Camera not found');
+      return;
+    }
+
+    console.log('🎯 Placing model at:', {
+      position: position.toArray().map(v => v.toFixed(2)),
+      rotation: rotation.toArray().map(v => v.toFixed(2)),
+      modelUrl: currentModel
+    });
 
     anchorRef.current.place(camera, position, rotation);
     setGestureTransform({ 
@@ -921,9 +844,9 @@ export default function CustomARViewer({ onClose }) {
     
     analytics.trackARPlacement({ 
       confidence: analysis?.confidence,
-      method: useWebXR ? 'webxr' : 'cv'
+      surfaceType: analysis?.surfaceType
     });
-  }, [analysis, useWebXR]);
+  }, [analysis, currentModel]);
 
   const handleReset = useCallback(() => {
     setPlaced(false);
@@ -958,11 +881,10 @@ export default function CustomARViewer({ onClose }) {
     }, 'image/png');
   }, []);
 
-  const isGood = useWebXR ? true : (analysis?.isWall && analysis?.confidence > 0.7);
+  const isGood = analysis?.isPlane && analysis?.confidence > 0.45;
 
   return (
-    <div className="ar-viewer-native">
-      {/* Video background (hidden for WebXR) */}
+    <div className="ar-viewer-complete">
       <video 
         ref={videoRef} 
         autoPlay 
@@ -976,12 +898,10 @@ export default function CustomARViewer({ onClose }) {
           width: '100%',
           height: '100%',
           objectFit: 'cover',
-          zIndex: 1,
-          display: useWebXR ? 'none' : 'block'
+          zIndex: 1
         }}
       />
 
-      {/* Three.js AR Canvas */}
       {ready && (
         <div ref={canvasRef} className="ar-canvas-layer" style={{
           position: 'fixed',
@@ -989,34 +909,33 @@ export default function CustomARViewer({ onClose }) {
           left: 0,
           width: '100%',
           height: '100%',
-          zIndex: 2
+          zIndex: 2,
+          pointerEvents: 'auto'
         }}>
           <Canvas
             gl={{ 
               alpha: true, 
               antialias: true, 
               preserveDrawingBuffer: true,
-              xr: { enabled: useWebXR }
+              powerPreference: "high-performance"
             }}
             style={{ background: 'transparent' }}
-            onCreated={({ camera, gl }) => {
+            onCreated={({ camera, gl, scene }) => {
               const c = canvasRef.current?.querySelector('canvas');
-              if (c) c.__threeCamera = camera;
-              
-              if (useWebXR) {
-                webxrRef.current.startSession(gl);
+              if (c) {
+                c.__threeCamera = camera;
+                c.__threeScene = scene;
               }
+              console.log('✅ Canvas created');
             }}
           >
             <PerspectiveCamera makeDefault position={[0, 0, 0]} fov={70} />
-            <ambientLight intensity={0.8} />
-            <directionalLight 
-              position={[5, 5, 5]} 
-              intensity={1.5} 
-              castShadow 
-              shadow-mapSize-width={2048}
-              shadow-mapSize-height={2048}
-            />
+            
+            <ambientLight intensity={1.5} />
+            <directionalLight position={[5, 5, 5]} intensity={2} castShadow />
+            <directionalLight position={[-5, -5, -5]} intensity={1} />
+            <hemisphereLight skyColor="#ffffff" groundColor="#888888" intensity={1} />
+            
             <Environment preset="apartment" />
             
             <ARScene
@@ -1029,31 +948,26 @@ export default function CustomARViewer({ onClose }) {
               onAnalysis={setAnalysis}
               gestureTransform={gestureTransform}
               gestureController={gestureRef.current}
-              useWebXR={useWebXR}
-              webxrManager={webxrRef.current}
             />
           </Canvas>
         </div>
       )}
 
-      {/* Loading screen */}
       {!ready && !error && (
-        <div className="ar-loading-screen">
+        <div className="ar-loading">
           <div className="spinner">
             <div className="spinner-ring"></div>
             <div className="spinner-ring"></div>
-            <div className="spinner-ring"></div>
           </div>
-          <h3>Starting AR Experience</h3>
-          <p>{useWebXR ? 'Initializing WebXR...' : 'Starting camera...'}</p>
+          <h3>Starting AR</h3>
+          <p>Initializing camera...</p>
         </div>
       )}
 
-      {/* Error screen */}
       {error && (
-        <div className="ar-error-screen">
+        <div className="ar-error">
           <AlertTriangle size={56} color="#ff3333" />
-          <h3>Camera Access Required</h3>
+          <h3>Camera Required</h3>
           <p>{error}</p>
           <button onClick={startCamera} className="btn-retry">
             <RefreshCw size={20} /> Try Again
@@ -1061,102 +975,65 @@ export default function CustomARViewer({ onClose }) {
         </div>
       )}
 
-      {/* AR UI Overlay */}
       {ready && (
         <>
-          {/* Header */}
           <header className="ar-header">
-            <button className="ar-btn-close" onClick={onClose} aria-label="Close AR">
+            <button className="btn-close" onClick={onClose}>
               <X size={24} />
             </button>
             
-            <div className="ar-status-badge">
+            <div className="status-badge">
               {phase === 'scan' && (
                 <>
                   <Crosshair size={18} color={isGood ? "#00ff00" : "#ff9500"} />
-                  <span>{isGood ? 'TAP TO PLACE' : analysis?.reason || 'Finding surface...'}</span>
+                  <span>{isGood ? 'TAP TO PLACE' : analysis?.reason || 'Scanning...'}</span>
                 </>
               )}
               {phase === 'placed' && (
                 <>
                   <CheckCircle size={18} color="#00ff00" />
-                  <span>Object Placed</span>
+                  <span>Placed</span>
                 </>
               )}
             </div>
-
-            {useWebXR && (
-              <div className="ar-badge-webxr">
-                <Zap size={14} />
-                <span>WebXR</span>
-              </div>
-            )}
           </header>
 
-          {/* Scanning guide */}
-          {phase === 'scan' && !useWebXR && (
-            <div className={`ar-guide ${isGood ? 'ready' : 'scanning'}`}>
-              <div className="ar-guide-icon">
-                {isGood ? (
-                  <CheckCircle size={64} color="#00ff00" />
-                ) : (
-                  <Move size={64} color="#ff9500" />
-                )}
+          {phase === 'scan' && (
+            <div className={`guide ${isGood ? 'ready' : 'scanning'}`}>
+              <div className="guide-icon">
+                {isGood ? <CheckCircle size={64} color="#00ff00" /> : <Move size={64} color="#ff9500" />}
               </div>
-              <h3>{isGood ? 'Perfect! 🎯' : 'Keep moving...'}</h3>
-              <p className="ar-guide-text">
-                {isGood 
-                  ? 'Tap the green target to place your frame' 
-                  : analysis?.reason || 'Move camera slowly to find a wall'}
-              </p>
+              <h3>{isGood ? 'Perfect! 🎯' : 'Finding surface...'}</h3>
+              <p>{analysis?.reason || 'Move camera to scan surface'}</p>
               {analysis?.metrics && (
-                <div className="ar-metrics">
-                  <span>Brightness: {analysis.metrics.brightness}</span>
-                  <span>Edges: {analysis.metrics.edges}</span>
+                <div className="metrics">
                   <span>Uniformity: {analysis.metrics.uniformity}</span>
+                  <span>Brightness: {analysis.metrics.brightness}</span>
+                  <span>Texture: {analysis.metrics.texture}</span>
                 </div>
               )}
               {analysis?.stable && (
-                <div className="ar-confidence-bar">
-                  <div 
-                    className="ar-confidence-fill" 
-                    style={{width: `${analysis.confidence * 100}%`}}
-                  />
+                <div className="confidence-bar">
+                  <div className="confidence-fill" style={{width: `${analysis.confidence * 100}%`}} />
                 </div>
               )}
             </div>
           )}
 
-          {/* Controls when placed */}
           {placed && (
             <>
-              <div className="ar-instructions">
-                <div className="ar-instruction-item">
-                  <span>✋</span> Drag to move
-                </div>
-                <div className="ar-instruction-item">
-                  <span>🤏</span> Pinch to scale
-                </div>
-                <div className="ar-instruction-item">
-                  <span>🔄</span> Rotate with 2 fingers
-                </div>
+              <div className="instructions">
+                <div><span>✋</span> Drag</div>
+                <div><span>🤏</span> Pinch</div>
+                <div><span>🔄</span> Rotate</div>
               </div>
               
-              <div className="ar-toolbar">
-                <button 
-                  className="ar-tool-btn capture" 
-                  onClick={handleScreenshot}
-                  aria-label="Take screenshot"
-                >
+              <div className="toolbar">
+                <button className="tool-btn capture" onClick={handleScreenshot}>
                   <Camera size={24} />
                   <span>Capture</span>
                 </button>
-                
-                <button 
-                  className="ar-tool-btn reset" 
-                  onClick={handleReset}
-                  aria-label="Reset placement"
-                >
+                <button className="tool-btn reset" onClick={handleReset}>
                   <RotateCcw size={24} />
                   <span>Reset</span>
                 </button>
@@ -1167,19 +1044,14 @@ export default function CustomARViewer({ onClose }) {
       )}
 
       <style jsx>{`
-        .ar-viewer-native {
+        .ar-viewer-complete {
           position: fixed;
           inset: 0;
           background: #000;
           z-index: 9999;
         }
 
-        .ar-video {
-          pointer-events: none;
-        }
-
-        .ar-loading-screen,
-        .ar-error-screen {
+        .ar-loading, .ar-error {
           position: fixed;
           inset: 0;
           display: flex;
@@ -1205,30 +1077,20 @@ export default function CustomARViewer({ onClose }) {
           border: 4px solid transparent;
           border-top-color: #00ff00;
           border-radius: 50%;
-          animation: spin 1.5s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+          animation: spin 1.5s linear infinite;
         }
 
         .spinner-ring:nth-child(2) {
           border-top-color: #0088ff;
-          animation-delay: -0.3s;
-          width: 70%;
-          height: 70%;
-          top: 15%;
-          left: 15%;
-        }
-
-        .spinner-ring:nth-child(3) {
-          border-top-color: #ff00ff;
-          animation-delay: -0.6s;
-          width: 40%;
-          height: 40%;
-          top: 30%;
-          left: 30%;
+          animation-delay: -0.5s;
+          width: 60%;
+          height: 60%;
+          top: 20%;
+          left: 20%;
         }
 
         @keyframes spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
+          to { transform: rotate(360deg); }
         }
 
         .ar-header {
@@ -1241,57 +1103,38 @@ export default function CustomARViewer({ onClose }) {
           justify-content: space-between;
           align-items: center;
           z-index: 100;
-          background: linear-gradient(180deg, rgba(0,0,0,0.6) 0%, transparent 100%);
+          background: linear-gradient(180deg, rgba(0,0,0,0.6), transparent);
         }
 
-        .ar-btn-close {
+        .btn-close {
           width: 44px;
           height: 44px;
           border-radius: 50%;
-          background: rgba(0, 0, 0, 0.7);
+          background: rgba(0,0,0,0.7);
           backdrop-filter: blur(10px);
-          border: 1px solid rgba(255, 255, 255, 0.1);
+          border: 1px solid rgba(255,255,255,0.1);
           color: white;
           display: flex;
           align-items: center;
           justify-content: center;
           cursor: pointer;
-          transition: all 0.2s;
         }
 
-        .ar-btn-close:active {
-          transform: scale(0.95);
-          background: rgba(0, 0, 0, 0.9);
-        }
-
-        .ar-status-badge {
+        .status-badge {
           display: flex;
           align-items: center;
           gap: 8px;
           padding: 10px 16px;
-          background: rgba(0, 0, 0, 0.7);
+          background: rgba(0,0,0,0.7);
           backdrop-filter: blur(10px);
           border-radius: 24px;
-          border: 1px solid rgba(255, 255, 255, 0.1);
+          border: 1px solid rgba(255,255,255,0.1);
           color: white;
           font-size: 14px;
           font-weight: 500;
         }
 
-        .ar-badge-webxr {
-          display: flex;
-          align-items: center;
-          gap: 4px;
-          padding: 6px 12px;
-          background: rgba(0, 255, 0, 0.2);
-          border: 1px solid rgba(0, 255, 0, 0.4);
-          border-radius: 16px;
-          color: #00ff00;
-          font-size: 12px;
-          font-weight: 600;
-        }
-
-        .ar-guide {
+        .guide {
           position: fixed;
           bottom: max(env(safe-area-inset-bottom), 40px);
           left: 50%;
@@ -1299,20 +1142,20 @@ export default function CustomARViewer({ onClose }) {
           width: calc(100% - 48px);
           max-width: 400px;
           padding: 24px;
-          background: rgba(0, 0, 0, 0.85);
+          background: rgba(0,0,0,0.85);
           backdrop-filter: blur(20px);
           border-radius: 20px;
-          border: 1px solid rgba(255, 255, 255, 0.1);
+          border: 1px solid rgba(255,255,255,0.1);
           text-align: center;
           z-index: 100;
         }
 
-        .ar-guide.ready {
-          border-color: rgba(0, 255, 0, 0.3);
-          background: rgba(0, 50, 0, 0.85);
+        .guide.ready {
+          border-color: rgba(0,255,0,0.3);
+          background: rgba(0,50,0,0.85);
         }
 
-        .ar-guide-icon {
+        .guide-icon {
           margin-bottom: 16px;
           animation: float 2s ease-in-out infinite;
         }
@@ -1322,45 +1165,44 @@ export default function CustomARViewer({ onClose }) {
           50% { transform: translateY(-10px); }
         }
 
-        .ar-guide h3 {
+        .guide h3 {
           margin: 0 0 8px 0;
           font-size: 20px;
           font-weight: 600;
           color: white;
         }
 
-        .ar-guide-text {
+        .guide p {
           margin: 0 0 12px 0;
           font-size: 14px;
-          color: rgba(255, 255, 255, 0.8);
-          line-height: 1.5;
+          color: rgba(255,255,255,0.8);
         }
 
-        .ar-metrics {
+        .metrics {
           display: flex;
           justify-content: space-around;
           gap: 8px;
           margin-top: 12px;
           font-size: 11px;
-          color: rgba(255, 255, 255, 0.6);
+          color: rgba(255,255,255,0.6);
         }
 
-        .ar-confidence-bar {
+        .confidence-bar {
           width: 100%;
           height: 4px;
-          background: rgba(255, 255, 255, 0.1);
+          background: rgba(255,255,255,0.1);
           border-radius: 2px;
           margin-top: 12px;
           overflow: hidden;
         }
 
-        .ar-confidence-fill {
+        .confidence-fill {
           height: 100%;
-          background: linear-gradient(90deg, #00ff00, #00ff00);
+          background: #00ff00;
           transition: width 0.3s;
         }
 
-        .ar-instructions {
+        .instructions {
           position: fixed;
           top: max(env(safe-area-inset-top), 80px);
           left: 50%;
@@ -1368,27 +1210,25 @@ export default function CustomARViewer({ onClose }) {
           display: flex;
           gap: 16px;
           padding: 12px 20px;
-          background: rgba(0, 0, 0, 0.7);
+          background: rgba(0,0,0,0.7);
           backdrop-filter: blur(10px);
           border-radius: 20px;
-          border: 1px solid rgba(255, 255, 255, 0.1);
           z-index: 100;
         }
 
-        .ar-instruction-item {
+        .instructions div {
           display: flex;
           align-items: center;
           gap: 6px;
           font-size: 13px;
           color: white;
-          white-space: nowrap;
         }
 
-        .ar-instruction-item span {
+        .instructions span {
           font-size: 16px;
         }
 
-        .ar-toolbar {
+        .toolbar {
           position: fixed;
           bottom: max(env(safe-area-inset-bottom), 40px);
           left: 50%;
@@ -1398,31 +1238,25 @@ export default function CustomARViewer({ onClose }) {
           z-index: 100;
         }
 
-        .ar-tool-btn {
+        .tool-btn {
           display: flex;
           flex-direction: column;
           align-items: center;
           gap: 6px;
           padding: 16px 24px;
-          background: rgba(0, 0, 0, 0.8);
+          background: rgba(0,0,0,0.8);
           backdrop-filter: blur(10px);
-          border: 1px solid rgba(255, 255, 255, 0.2);
+          border: 1px solid rgba(255,255,255,0.2);
           border-radius: 16px;
           color: white;
           font-size: 12px;
-          font-weight: 500;
           cursor: pointer;
-          transition: all 0.2s;
         }
 
-        .ar-tool-btn.capture {
-          background: rgba(0, 255, 0, 0.2);
-          border-color: rgba(0, 255, 0, 0.4);
+        .tool-btn.capture {
+          background: rgba(0,255,0,0.2);
+          border-color: rgba(0,255,0,0.4);
           color: #00ff00;
-        }
-
-        .ar-tool-btn:active {
-          transform: scale(0.95);
         }
 
         .btn-retry {
@@ -1438,11 +1272,6 @@ export default function CustomARViewer({ onClose }) {
           font-size: 16px;
           font-weight: 600;
           cursor: pointer;
-          transition: all 0.2s;
-        }
-
-        .btn-retry:active {
-          transform: scale(0.95);
         }
       `}</style>
     </div>
