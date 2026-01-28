@@ -80,7 +80,7 @@ export default function CustomARViewer({ onClose }) {
   const transformCount = useRef(0);
   const initAttempts = useRef(0);
 
-  const [cameraStatus, setCameraStatus] = useState('initializing'); // initializing, requesting, ready, error
+  const [cameraStatus, setCameraStatus] = useState('initializing');
   const [cameraError, setCameraError] = useState(null);
   const [facingMode, setFacingMode] = useState('environment');
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -105,7 +105,6 @@ export default function CustomARViewer({ onClose }) {
    * Robust Camera Initialization with multiple fallbacks
    */
   const initCamera = useCallback(async () => {
-    // Check if already initialized
     if (streamRef.current || initAttempts.current > 3) {
       return;
     }
@@ -115,12 +114,10 @@ export default function CustomARViewer({ onClose }) {
     setCameraError(null);
 
     try {
-      // Check if getUserMedia is supported
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error('Camera API not supported in this browser');
       }
 
-      // Check if running on HTTPS or localhost
       const isSecure = window.location.protocol === 'https:' || 
                        window.location.hostname === 'localhost' ||
                        window.location.hostname === '127.0.0.1';
@@ -129,9 +126,7 @@ export default function CustomARViewer({ onClose }) {
         throw new Error('Camera requires HTTPS. Please access via https:// or localhost');
       }
 
-      // Progressive constraint fallback strategy
       const constraintSets = [
-        // Attempt 1: Ideal high quality with environment camera
         {
           video: {
             facingMode: { ideal: facingMode },
@@ -141,7 +136,6 @@ export default function CustomARViewer({ onClose }) {
           },
           audio: false
         },
-        // Attempt 2: Standard quality with environment camera
         {
           video: {
             facingMode: { exact: facingMode },
@@ -150,7 +144,6 @@ export default function CustomARViewer({ onClose }) {
           },
           audio: false
         },
-        // Attempt 3: Basic with facingMode preference
         {
           video: {
             facingMode: facingMode,
@@ -159,7 +152,6 @@ export default function CustomARViewer({ onClose }) {
           },
           audio: false
         },
-        // Attempt 4: Minimal constraints (any camera)
         {
           video: {
             width: { ideal: 1280 },
@@ -167,7 +159,6 @@ export default function CustomARViewer({ onClose }) {
           },
           audio: false
         },
-        // Attempt 5: Absolute fallback
         {
           video: true,
           audio: false
@@ -177,7 +168,6 @@ export default function CustomARViewer({ onClose }) {
       let stream = null;
       let lastError = null;
 
-      // Try each constraint set
       for (const constraints of constraintSets) {
         try {
           console.log('Attempting camera with constraints:', constraints);
@@ -190,7 +180,6 @@ export default function CustomARViewer({ onClose }) {
         } catch (err) {
           console.warn('Camera constraint attempt failed:', err.message);
           lastError = err;
-          // Continue to next constraint set
         }
       }
 
@@ -198,10 +187,8 @@ export default function CustomARViewer({ onClose }) {
         throw lastError || new Error('Failed to access camera with all constraint sets');
       }
 
-      // Store stream reference
       streamRef.current = stream;
 
-      // Get video element and attach stream
       const video = videoRef.current;
       if (!video) {
         throw new Error('Video element not found');
@@ -209,7 +196,6 @@ export default function CustomARViewer({ onClose }) {
 
       video.srcObject = stream;
 
-      // Wait for video metadata to load
       await new Promise((resolve, reject) => {
         video.onloadedmetadata = () => {
           console.log('Video metadata loaded');
@@ -221,26 +207,21 @@ export default function CustomARViewer({ onClose }) {
           reject(new Error('Video element failed to load'));
         };
 
-        // Timeout after 10 seconds
         setTimeout(() => reject(new Error('Video loading timeout')), 10000);
       });
 
-      // Play video
       try {
         await video.play();
         console.log('Video playing successfully');
       } catch (playError) {
         console.error('Video play error:', playError);
-        // Try muted play as fallback
         video.muted = true;
         await video.play();
       }
 
-      // Success!
       setCameraStatus('ready');
       setCameraError(null);
 
-      // Track analytics
       analytics.trackARSessionStarted({
         url: currentModel,
         type: modelType,
@@ -313,7 +294,11 @@ export default function CustomARViewer({ onClose }) {
    * Initialize camera on mount
    */
   useEffect(() => {
-    // Small delay to ensure DOM is ready
+    // Copy ref values to variables for cleanup
+    const startTime = sessionStartTime.current;
+    const screenshotCountValue = screenshotCount.current;
+    const transformCountValue = transformCount.current;
+
     const timer = setTimeout(() => {
       initCamera();
     }, 500);
@@ -322,12 +307,12 @@ export default function CustomARViewer({ onClose }) {
       clearTimeout(timer);
       stopCamera();
       
-      // Track session end
-      const duration = Date.now() - sessionStartTime.current;
+      // Use copied variables in cleanup
+      const duration = Date.now() - startTime;
       analytics.trackARSessionEnded({
         duration,
-        screenshots: screenshotCount.current,
-        transforms: transformCount.current,
+        screenshots: screenshotCountValue,
+        transforms: transformCountValue,
       });
     };
   }, [initCamera, stopCamera]);
@@ -405,13 +390,9 @@ export default function CustomARViewer({ onClose }) {
 
       const ctx = composite.getContext('2d');
 
-      // Draw video frame
       ctx.drawImage(video, 0, 0, composite.width, composite.height);
-
-      // Draw 3D canvas overlay
       ctx.drawImage(canvas, 0, 0, composite.width, composite.height);
 
-      // Convert to blob and download
       composite.toBlob((blob) => {
         if (!blob) return;
         
@@ -474,7 +455,6 @@ export default function CustomARViewer({ onClose }) {
 
   return (
     <div className="ar-viewer">
-      {/* Video Background */}
       <video
         ref={videoRef}
         className="ar-video"
@@ -492,7 +472,6 @@ export default function CustomARViewer({ onClose }) {
         }}
       />
 
-      {/* 3D Canvas Overlay */}
       {cameraStatus === 'ready' && (
         <div ref={canvasRef} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 2 }}>
           <Canvas
@@ -550,7 +529,6 @@ export default function CustomARViewer({ onClose }) {
         </div>
       )}
 
-      {/* Loading Overlay */}
       {(cameraStatus === 'initializing' || cameraStatus === 'requesting') && (
         <div className="ar-overlay loading-overlay">
           <div className="loading-spinner"></div>
@@ -563,7 +541,6 @@ export default function CustomARViewer({ onClose }) {
         </div>
       )}
 
-      {/* Error Overlay */}
       {cameraStatus === 'error' && (
         <div className="ar-overlay error-overlay">
           <div className="error-icon">⚠️</div>
@@ -592,7 +569,6 @@ export default function CustomARViewer({ onClose }) {
         </div>
       )}
 
-      {/* Top Bar */}
       {cameraStatus === 'ready' && (
         <>
           <div className="ar-topbar">
@@ -619,12 +595,10 @@ export default function CustomARViewer({ onClose }) {
             </div>
           </div>
 
-          {/* Instructions */}
           <div className="ar-instructions">
             <p>👆 Drag to move • 🤏 Pinch to scale • 🔄 Two fingers to rotate</p>
           </div>
 
-          {/* Controls */}
           {showControls && (
             <div className="ar-controls">
               <div className="controls-group movement-controls">
