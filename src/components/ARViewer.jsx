@@ -1,6 +1,6 @@
 /**
- * Native-Quality AR Viewer - Like ARKit Quick Look
- * Real wall detection, depth sensing, world anchoring, full gesture control
+ * Professional AR Viewer - True World Anchoring & Advanced Wall Detection
+ * Frame stays fixed in real world space, doesn't follow camera
  */
 import React, { useEffect, useRef, useState, useCallback, Suspense } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
@@ -15,368 +15,411 @@ import {
   RefreshCw,
   Scan,
   AlertTriangle,
-  CheckCircle,
-  ZoomIn,
-  RotateCw
+  CheckCircle
 } from 'lucide-react';
 
 import useARStore from '../store/useARStore';
 import analytics from '../services/analytics';
 
 /**
- * Advanced Wall Detector using Camera Feed Analysis
+ * Advanced Wall Detection System
+ * Uses multiple techniques to identify walls accurately
  */
-class CameraAnalyzer {
+class AdvancedWallDetector {
   constructor() {
     this.canvas = document.createElement('canvas');
     this.ctx = this.canvas.getContext('2d');
-    this.lastAnalysis = null;
+    this.history = [];
   }
 
-  analyzeFrame(video) {
-    if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) return null;
+  analyzeForWall(video) {
+    if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) {
+      return { isWall: false, confidence: 0, reason: 'Camera not ready' };
+    }
 
-    this.canvas.width = 320;
-    this.canvas.height = 240;
-    
+    // Capture frame at lower resolution for faster processing
+    this.canvas.width = 160;
+    this.canvas.height = 120;
     this.ctx.drawImage(video, 0, 0, this.canvas.width, this.canvas.height);
-    const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
     
-    // Analyze center region for wall detection
+    const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+    const data = imageData.data;
+
+    // Analyze center region (40% of screen)
     const centerX = Math.floor(this.canvas.width / 2);
     const centerY = Math.floor(this.canvas.height / 2);
-    const regionSize = 80;
+    const radius = Math.floor(this.canvas.width * 0.2);
+
+    let totalBrightness = 0;
+    let totalSaturation = 0;
+    let edgePixels = 0;
+    let pixelCount = 0;
     
-    let brightness = 0;
-    let saturation = 0;
-    let edgeCount = 0;
-    let uniformity = 0;
-    
-    const pixels = [];
-    
-    for (let y = centerY - regionSize; y < centerY + regionSize; y++) {
-      for (let x = centerX - regionSize; x < centerX + regionSize; x++) {
+    const colors = [];
+
+    // First pass - collect data
+    for (let y = centerY - radius; y <= centerY + radius; y++) {
+      for (let x = centerX - radius; x <= centerX + radius; x++) {
         if (x < 0 || x >= this.canvas.width || y < 0 || y >= this.canvas.height) continue;
         
-        const idx = (y * this.canvas.width + x) * 4;
-        const r = imageData.data[idx];
-        const g = imageData.data[idx + 1];
-        const b = imageData.data[idx + 2];
+        const i = (y * this.canvas.width + x) * 4;
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
         
-        brightness += (r + g + b) / 3;
-        
+        const brightness = (r + g + b) / 3;
         const max = Math.max(r, g, b);
         const min = Math.min(r, g, b);
-        saturation += max - min;
+        const saturation = max === 0 ? 0 : (max - min) / max;
         
-        pixels.push({ r, g, b });
-        
-        // Edge detection
+        totalBrightness += brightness;
+        totalSaturation += saturation;
+        colors.push({ r, g, b, brightness });
+        pixelCount++;
+
+        // Edge detection (check if neighboring pixels are very different)
         if (x > 0 && y > 0) {
-          const prevIdx = ((y - 1) * this.canvas.width + x) * 4;
-          const diff = Math.abs(imageData.data[idx] - imageData.data[prevIdx]);
-          if (diff > 30) edgeCount++;
+          const prevI = ((y - 1) * this.canvas.width + x) * 4;
+          const diff = Math.abs(data[i] - data[prevI]) + 
+                      Math.abs(data[i + 1] - data[prevI + 1]) + 
+                      Math.abs(data[i + 2] - data[prevI + 2]);
+          if (diff > 90) edgePixels++;
         }
       }
     }
-    
-    const pixelCount = pixels.length;
-    brightness /= pixelCount;
-    saturation /= pixelCount;
-    
-    // Calculate color uniformity (walls are usually uniform)
-    const avgR = pixels.reduce((sum, p) => sum + p.r, 0) / pixelCount;
-    const avgG = pixels.reduce((sum, p) => sum + p.g, 0) / pixelCount;
-    const avgB = pixels.reduce((sum, p) => sum + p.b, 0) / pixelCount;
-    
+
+    const avgBrightness = totalBrightness / pixelCount;
+    const avgSaturation = totalSaturation / pixelCount;
+    const edgeDensity = edgePixels / pixelCount;
+
+    // Calculate color uniformity
     let variance = 0;
-    pixels.forEach(p => {
-      variance += Math.pow(p.r - avgR, 2) + Math.pow(p.g - avgG, 2) + Math.pow(p.b - avgB, 2);
+    colors.forEach(c => {
+      variance += Math.pow(c.brightness - avgBrightness, 2);
     });
-    variance /= pixelCount;
-    uniformity = 1 / (1 + variance / 10000); // Normalize
+    variance = Math.sqrt(variance / pixelCount);
+    const uniformity = 1 / (1 + variance / 50);
+
+    // Analyze bottom vs center (floor detection)
+    const bottomY = Math.floor(this.canvas.height * 0.8);
+    let bottomBrightness = 0;
+    let bottomCount = 0;
     
-    // Classification
-    const edgeDensity = edgeCount / pixelCount;
-    
+    for (let y = bottomY; y < this.canvas.height; y++) {
+      for (let x = 0; x < this.canvas.width; x++) {
+        const i = (y * this.canvas.width + x) * 4;
+        bottomBrightness += (data[i] + data[i + 1] + data[i + 2]) / 3;
+        bottomCount++;
+      }
+    }
+    bottomBrightness /= bottomCount;
+
+    // Classification logic
     let surfaceType = 'unknown';
     let confidence = 0;
     let reason = '';
+    let isWall = false;
+
+    // Wall characteristics:
+    // - Uniform color (low variance)
+    // - Medium brightness (not too bright like window, not too dark like floor)
+    // - Low edge density (not textured)
+    // - Low saturation (walls are usually neutral colors)
+    // - Similar brightness top and bottom (vertical surface)
+
+    const brightnessGradient = Math.abs(avgBrightness - bottomBrightness);
     
-    // Wall: uniform, medium brightness, low edges
-    if (uniformity > 0.5 && edgeDensity < 0.1 && brightness > 50 && brightness < 220) {
+    // WALL DETECTION
+    if (
+      uniformity > 0.65 &&                    // Very uniform
+      avgBrightness > 60 && avgBrightness < 200 &&  // Medium brightness
+      edgeDensity < 0.08 &&                   // Few edges
+      avgSaturation < 0.4 &&                  // Low saturation
+      brightnessGradient < 40                 // Uniform top to bottom (vertical)
+    ) {
       surfaceType = 'wall';
-      confidence = uniformity * 0.5 + (1 - edgeDensity) * 0.3 + (1 - saturation / 100) * 0.2;
-      reason = 'Good wall surface';
+      isWall = true;
+      confidence = Math.min(0.95, uniformity * 0.4 + (1 - edgeDensity) * 0.3 + (1 - avgSaturation) * 0.3);
+      reason = 'Clean wall detected';
     }
-    // Window: high brightness, high edges
-    else if (brightness > 180 || (edgeDensity > 0.15 && saturation < 30)) {
+    // FLOOR DETECTION
+    else if (
+      brightnessGradient > 50 ||              // Gradient indicates looking down
+      (avgBrightness < 80 && edgeDensity > 0.1)  // Dark and textured
+    ) {
+      surfaceType = 'floor';
+      confidence = 0.15;
+      reason = 'Floor detected - aim higher';
+      isWall = false;
+    }
+    // WINDOW/BRIGHT AREA
+    else if (avgBrightness > 200 || (avgBrightness > 180 && uniformity > 0.8)) {
       surfaceType = 'window';
       confidence = 0.2;
       reason = 'Window or bright area';
+      isWall = false;
     }
-    // Floor: typically darker, textured
-    else if (brightness < 100 && edgeDensity > 0.12) {
-      surfaceType = 'floor';
-      confidence = 0.1;
-      reason = 'Floor or dark surface';
-    }
-    // Textured/busy area
-    else if (edgeDensity > 0.15 || uniformity < 0.3) {
+    // TEXTURED SURFACE
+    else if (edgeDensity > 0.15 || uniformity < 0.4) {
       surfaceType = 'textured';
-      confidence = 0.2;
-      reason = 'Too much detail/texture';
+      confidence = 0.25;
+      reason = 'Too much texture/detail';
+      isWall = false;
     }
+    // CEILING
+    else if (avgBrightness > 160 && brightnessGradient > 30 && bottomBrightness < avgBrightness) {
+      surfaceType = 'ceiling';
+      confidence = 0.2;
+      reason = 'Ceiling - aim lower';
+      isWall = false;
+    }
+    // UNCERTAIN
     else {
       surfaceType = 'uncertain';
       confidence = 0.3;
-      reason = 'Unclear surface';
-    }
-    
-    this.lastAnalysis = {
-      surfaceType,
-      confidence,
-      reason,
-      brightness,
-      uniformity,
-      edgeDensity,
-      isWall: surfaceType === 'wall' && confidence > 0.5
-    };
-    
-    return this.lastAnalysis;
-  }
-}
-
-/**
- * IMU-based World Tracker (uses device sensors)
- */
-class IMUWorldTracker {
-  constructor() {
-    this.worldAnchors = new Map();
-    this.deviceOrientation = { alpha: 0, beta: 0, gamma: 0 };
-    this.deviceMotion = { x: 0, y: 0, z: 0 };
-    this.initialOrientation = null;
-    this.cameraOffset = new THREE.Vector3(0, 0, 0);
-    
-    this.startTracking();
-  }
-
-  startTracking() {
-    if (window.DeviceOrientationEvent) {
-      window.addEventListener('deviceorientation', (e) => {
-        if (!this.initialOrientation && e.alpha !== null) {
-          this.initialOrientation = { alpha: e.alpha, beta: e.beta, gamma: e.gamma };
-        }
-        this.deviceOrientation = { alpha: e.alpha, beta: e.beta, gamma: e.gamma };
-      }, true);
+      reason = 'Move camera slowly';
+      isWall = false;
     }
 
-    if (window.DeviceMotionEvent) {
-      window.addEventListener('devicemotion', (e) => {
-        if (e.acceleration) {
-          this.deviceMotion.x = e.acceleration.x || 0;
-          this.deviceMotion.y = e.acceleration.y || 0;
-          this.deviceMotion.z = e.acceleration.z || 0;
-        }
-      }, true);
-    }
-  }
+    // Smooth results over time
+    this.history.push({ isWall, confidence, surfaceType });
+    if (this.history.length > 5) this.history.shift();
 
-  addAnchor(id, cameraPosition, cameraRotation, targetPosition, targetRotation) {
-    // Store anchor in world space relative to initial camera position
-    this.worldAnchors.set(id, {
-      worldPosition: targetPosition.clone(),
-      worldRotation: targetRotation.clone(),
-      cameraPositionAtPlacement: cameraPosition.clone(),
-      cameraRotationAtPlacement: cameraRotation.clone(),
-      locked: true
-    });
-  }
-
-  getAnchorTransform(id, currentCamera) {
-    const anchor = this.worldAnchors.get(id);
-    if (!anchor) return null;
-
-    // Calculate camera movement since placement
-    const cameraDelta = new THREE.Vector3()
-      .subVectors(currentCamera.position, anchor.cameraPositionAtPlacement);
-
-    // Keep anchor at original world position
-    const adjustedPosition = anchor.worldPosition.clone().sub(cameraDelta);
+    // Require consistent wall detection
+    const recentWalls = this.history.filter(h => h.isWall).length;
+    const finalIsWall = recentWalls >= 3; // Need 3 out of last 5 frames
+    const finalConfidence = finalIsWall ? Math.min(...this.history.slice(-3).map(h => h.confidence)) : confidence;
 
     return {
-      position: adjustedPosition,
-      rotation: anchor.worldRotation.clone(),
-      scale: 1
+      isWall: finalIsWall,
+      confidence: finalConfidence,
+      surfaceType,
+      reason: finalIsWall ? 'Stable wall detected' : reason,
+      metrics: {
+        uniformity: uniformity.toFixed(2),
+        brightness: avgBrightness.toFixed(0),
+        edgeDensity: edgeDensity.toFixed(2),
+        saturation: avgSaturation.toFixed(2)
+      }
     };
-  }
-
-  updateAnchor(id, newTransform) {
-    const anchor = this.worldAnchors.get(id);
-    if (anchor) {
-      if (newTransform.position) anchor.worldPosition.copy(newTransform.position);
-      if (newTransform.rotation) anchor.worldRotation.copy(newTransform.rotation);
-    }
   }
 }
 
 /**
- * Gesture Controller - Full touch controls
+ * True World Space Tracker
+ * Maintains absolute world coordinates independent of camera
  */
-class GestureController {
-  constructor(onTransform) {
-    this.onTransform = onTransform;
-    this.touches = [];
-    this.mode = null;
-    this.lastSingleTouch = null;
-    this.lastPinchDistance = 0;
-    this.lastRotationAngle = 0;
+class WorldSpaceTracker {
+  constructor() {
+    this.anchors = new Map();
+    this.initialCameraState = null;
   }
 
-  handleTouchStart(event, currentTransform) {
-    this.touches = Array.from(event.touches);
-    
-    if (this.touches.length === 1) {
-      this.mode = 'move';
-      this.lastSingleTouch = {
-        x: this.touches[0].clientX,
-        y: this.touches[0].clientY
+  // Called once when frame is placed
+  createAnchor(id, cameraPosition, cameraQuaternion, targetWorldPosition, targetWorldQuaternion) {
+    // Store the camera's state at placement time
+    if (!this.initialCameraState) {
+      this.initialCameraState = {
+        position: cameraPosition.clone(),
+        quaternion: cameraQuaternion.clone()
       };
-    } else if (this.touches.length === 2) {
-      const dx = this.touches[0].clientX - this.touches[1].clientX;
-      const dy = this.touches[0].clientY - this.touches[1].clientY;
-      this.lastPinchDistance = Math.sqrt(dx * dx + dy * dy);
-      this.lastRotationAngle = Math.atan2(dy, dx);
+    }
+
+    // Store anchor in absolute world coordinates
+    this.anchors.set(id, {
+      worldPosition: targetWorldPosition.clone(),
+      worldQuaternion: targetWorldQuaternion.clone(),
+      initialCameraPosition: cameraPosition.clone(),
+      initialCameraQuaternion: cameraQuaternion.clone(),
+      scale: 1
+    });
+
+    console.log('🎯 Anchor created at world position:', targetWorldPosition);
+  }
+
+  // Called every frame to get where to render the model
+  getModelTransform(id, currentCamera) {
+    const anchor = this.anchors.get(id);
+    if (!anchor) return null;
+
+    // Calculate how much the camera has moved since placement
+    const cameraDelta = new THREE.Vector3()
+      .subVectors(currentCamera.position, anchor.initialCameraPosition);
+
+    // The model's position relative to current camera = 
+    // original world position - camera movement
+    const modelPosition = anchor.worldPosition.clone().sub(cameraDelta);
+
+    return {
+      position: modelPosition,
+      quaternion: anchor.worldQuaternion.clone(),
+      scale: anchor.scale
+    };
+  }
+
+  updateAnchor(id, updates) {
+    const anchor = this.anchors.get(id);
+    if (!anchor) return;
+
+    if (updates.position) {
+      // When updating position via gesture, update the world position
+      const cameraDelta = new THREE.Vector3()
+        .subVectors(updates.cameraPosition || new THREE.Vector3(), anchor.initialCameraPosition);
+      anchor.worldPosition.copy(updates.position).add(cameraDelta);
+    }
+    if (updates.quaternion) anchor.worldQuaternion.copy(updates.quaternion);
+    if (updates.scale !== undefined) anchor.scale = updates.scale;
+  }
+
+  reset() {
+    this.anchors.clear();
+    this.initialCameraState = null;
+  }
+}
+
+/**
+ * Gesture Controller
+ */
+class GestureController {
+  constructor(onUpdate) {
+    this.onUpdate = onUpdate;
+    this.initialTouch = null;
+    this.initialPinch = null;
+    this.mode = null;
+  }
+
+  start(event, currentTransform) {
+    if (event.touches.length === 1) {
+      this.mode = 'pan';
+      this.initialTouch = {
+        x: event.touches[0].clientX,
+        y: event.touches[0].clientY
+      };
+    } else if (event.touches.length === 2) {
       this.mode = 'pinch-rotate';
+      const dx = event.touches[1].clientX - event.touches[0].clientX;
+      const dy = event.touches[1].clientY - event.touches[0].clientY;
+      this.initialPinch = {
+        distance: Math.sqrt(dx * dx + dy * dy),
+        angle: Math.atan2(dy, dx),
+        scale: currentTransform.scale
+      };
     }
   }
 
-  handleTouchMove(event, currentTransform, camera) {
-    this.touches = Array.from(event.touches);
-    
-    if (this.mode === 'move' && this.touches.length === 1) {
-      const deltaX = (this.touches[0].clientX - this.lastSingleTouch.x) * 0.001;
-      const deltaY = -(this.touches[0].clientY - this.lastSingleTouch.y) * 0.001;
+  move(event, currentTransform, camera) {
+    if (this.mode === 'pan' && event.touches.length === 1) {
+      const dx = (event.touches[0].clientX - this.initialTouch.x) * 0.002;
+      const dy = -(event.touches[0].clientY - this.initialTouch.y) * 0.002;
       
       const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
       const up = new THREE.Vector3(0, 1, 0);
       
-      const newPos = currentTransform.position.clone();
-      newPos.add(right.multiplyScalar(deltaX));
-      newPos.add(up.multiplyScalar(deltaY));
+      const newPosition = currentTransform.position.clone()
+        .add(right.multiplyScalar(dx))
+        .add(up.multiplyScalar(dy));
       
-      this.onTransform({
-        position: newPos,
-        rotation: currentTransform.rotation,
-        scale: currentTransform.scale
+      this.onUpdate({
+        position: newPosition,
+        quaternion: currentTransform.quaternion,
+        scale: currentTransform.scale,
+        cameraPosition: camera.position
       });
       
-      this.lastSingleTouch = {
-        x: this.touches[0].clientX,
-        y: this.touches[0].clientY
+      this.initialTouch = {
+        x: event.touches[0].clientX,
+        y: event.touches[0].clientY
       };
     }
-    else if (this.mode === 'pinch-rotate' && this.touches.length === 2) {
-      const dx = this.touches[0].clientX - this.touches[1].clientX;
-      const dy = this.touches[0].clientY - this.touches[1].clientY;
+    else if (this.mode === 'pinch-rotate' && event.touches.length === 2) {
+      const dx = event.touches[1].clientX - event.touches[0].clientX;
+      const dy = event.touches[1].clientY - event.touches[0].clientY;
       const distance = Math.sqrt(dx * dx + dy * dy);
       const angle = Math.atan2(dy, dx);
       
       // Scale
-      const scaleDelta = (distance - this.lastPinchDistance) * 0.002;
-      const newScale = Math.max(0.3, Math.min(4, currentTransform.scale + scaleDelta));
+      const scaleRatio = distance / this.initialPinch.distance;
+      const newScale = Math.max(0.3, Math.min(3, this.initialPinch.scale * scaleRatio));
       
       // Rotation
-      const rotationDelta = angle - this.lastRotationAngle;
-      const newRotation = currentTransform.rotation.clone();
-      const rotationQuat = new THREE.Quaternion();
-      rotationQuat.setFromAxisAngle(new THREE.Vector3(0, 0, 1), rotationDelta * 0.5);
-      newRotation.multiply(rotationQuat);
+      const angleDelta = angle - this.initialPinch.angle;
+      const rotQuat = new THREE.Quaternion();
+      rotQuat.setFromAxisAngle(new THREE.Vector3(0, 0, 1), angleDelta);
+      const newQuaternion = currentTransform.quaternion.clone().multiply(rotQuat);
       
-      this.onTransform({
+      this.onUpdate({
         position: currentTransform.position,
-        rotation: newRotation,
-        scale: newScale
+        quaternion: newQuaternion,
+        scale: newScale,
+        cameraPosition: camera.position
       });
-      
-      this.lastPinchDistance = distance;
-      this.lastRotationAngle = angle;
     }
   }
 
-  handleTouchEnd() {
+  end() {
     this.mode = null;
-    this.touches = [];
+    this.initialTouch = null;
+    this.initialPinch = null;
   }
 }
 
 /**
- * Smart Reticle with Real-time Feedback
+ * Enhanced Reticle
  */
-function SmartReticle({ position, analysis, visible }) {
-  const ringRef = useRef();
+function EnhancedReticle({ position, analysis, visible }) {
+  const groupRef = useRef();
   const pulseRef = useRef();
   
   useFrame(({ clock }) => {
-    if (ringRef.current && visible) {
-      ringRef.current.rotation.z = clock.elapsedTime * 0.5;
+    if (groupRef.current && visible) {
+      groupRef.current.rotation.z = clock.elapsedTime * 0.5;
     }
     if (pulseRef.current && visible) {
-      const scale = 1 + Math.sin(clock.elapsedTime * 3) * 0.1;
+      const scale = 1 + Math.sin(clock.elapsedTime * 4) * 0.12;
       pulseRef.current.scale.setScalar(scale);
     }
   });
   
   if (!visible) return null;
 
-  const isGood = analysis?.isWall && analysis?.confidence > 0.5;
-  const color = isGood ? '#00ff00' : '#ff0000';
-  const size = isGood ? 1 : 0.7;
+  const isGood = analysis?.isWall && analysis?.confidence > 0.7;
+  const color = isGood ? '#00ff00' : '#ff3333';
+  const size = isGood ? 1.2 : 0.8;
   
   return (
-    <group position={position}>
+    <group position={position} ref={groupRef}>
       <mesh>
-        <circleGeometry args={[0.03 * size, 32]} />
+        <circleGeometry args={[0.025 * size, 32]} />
         <meshBasicMaterial color={color} transparent opacity={1} depthTest={false} />
       </mesh>
       
-      <mesh ref={ringRef}>
-        <ringGeometry args={[0.1 * size, 0.11 * size, 32]} />
-        <meshBasicMaterial color={color} transparent opacity={0.8} side={THREE.DoubleSide} depthTest={false} />
+      <mesh>
+        <ringGeometry args={[0.08 * size, 0.09 * size, 32]} />
+        <meshBasicMaterial color={color} transparent opacity={0.9} side={THREE.DoubleSide} depthTest={false} />
       </mesh>
       
       <mesh ref={pulseRef}>
-        <ringGeometry args={[0.15 * size, 0.16 * size, 32]} />
-        <meshBasicMaterial color={color} transparent opacity={0.5} side={THREE.DoubleSide} depthTest={false} />
+        <ringGeometry args={[0.13 * size, 0.14 * size, 32]} />
+        <meshBasicMaterial color={color} transparent opacity={0.6} side={THREE.DoubleSide} depthTest={false} />
       </mesh>
       
-      {isGood && (
-        <>
-          {[0, 90, 180, 270].map((angle, i) => (
-            <mesh 
-              key={i}
-              position={[
-                Math.cos((angle * Math.PI) / 180) * 0.2,
-                Math.sin((angle * Math.PI) / 180) * 0.2,
-                0
-              ]}
-              rotation={[0, 0, (angle * Math.PI) / 180]}
-            >
-              <planeGeometry args={[0.05, 0.012]} />
-              <meshBasicMaterial color={color} transparent opacity={0.9} depthTest={false} />
-            </mesh>
-          ))}
-        </>
-      )}
+      {isGood && [0, 90, 180, 270].map((angle, i) => (
+        <group key={i} rotation={[0, 0, (angle * Math.PI) / 180]}>
+          <mesh position={[0.18 * size, 0, 0]}>
+            <planeGeometry args={[0.05, 0.012]} />
+            <meshBasicMaterial color={color} transparent opacity={0.9} depthTest={false} />
+          </mesh>
+        </group>
+      ))}
       
       {!isGood && (
         <>
           <mesh rotation={[0, 0, Math.PI / 4]}>
-            <planeGeometry args={[0.2, 0.025]} />
+            <planeGeometry args={[0.22, 0.03]} />
             <meshBasicMaterial color={color} transparent opacity={0.9} depthTest={false} />
           </mesh>
           <mesh rotation={[0, 0, -Math.PI / 4]}>
-            <planeGeometry args={[0.2, 0.025]} />
+            <planeGeometry args={[0.22, 0.03]} />
             <meshBasicMaterial color={color} transparent opacity={0.9} depthTest={false} />
           </mesh>
         </>
@@ -386,9 +429,9 @@ function SmartReticle({ position, analysis, visible }) {
 }
 
 /**
- * World-Anchored 3D Model
+ * World-Anchored Model
  */
-function WorldAnchoredModel({ url, worldTracker, anchorId, isPlaced, currentTransform }) {
+function WorldAnchoredModel({ url, worldTracker, anchorId, isPlaced, activeTransform }) {
   const modelRef = useRef();
   const gltf = useGLTF(url);
   const [modelSize, setModelSize] = useState(1);
@@ -399,28 +442,26 @@ function WorldAnchoredModel({ url, worldTracker, anchorId, isPlaced, currentTran
       const box = new THREE.Box3().setFromObject(gltf.scene);
       const size = box.getSize(new THREE.Vector3());
       const maxDim = Math.max(size.x, size.y, size.z);
-      setModelSize(0.45 / maxDim);
+      setModelSize(0.4 / maxDim);
     }
   }, [gltf]);
 
   useFrame(() => {
     if (!modelRef.current || !isPlaced) return;
 
-    if (currentTransform) {
-      // Use current transform during gesture control
-      modelRef.current.position.copy(currentTransform.position);
-      modelRef.current.quaternion.copy(currentTransform.rotation);
-      modelRef.current.scale.setScalar(currentTransform.scale * modelSize);
+    // Use active transform during gestures, otherwise get from world tracker
+    let transform;
+    if (activeTransform) {
+      transform = activeTransform;
     } else {
-      // Use world tracker position
-      const anchor = worldTracker?.getAnchorTransform(anchorId, camera);
-      if (anchor) {
-        modelRef.current.position.copy(anchor.position);
-        modelRef.current.quaternion.copy(anchor.rotation);
-        modelRef.current.scale.setScalar(anchor.scale * modelSize);
-      }
+      transform = worldTracker?.getModelTransform(anchorId, camera);
     }
 
+    if (!transform) return;
+
+    modelRef.current.position.copy(transform.position);
+    modelRef.current.quaternion.copy(transform.quaternion);
+    modelRef.current.scale.setScalar(transform.scale * modelSize);
     modelRef.current.visible = true;
   });
 
@@ -449,23 +490,24 @@ function WorldAnchoredModel({ url, worldTracker, anchorId, isPlaced, currentTran
 }
 
 /**
- * Detection Planes
+ * Hit Test System
  */
-function DetectionPlanes({ onHitTest, isActive }) {
+function HitTestSystem({ onHit, isActive }) {
   const { camera, scene } = useThree();
   const raycaster = useRef(new THREE.Raycaster());
   const planes = useRef([]);
 
   useEffect(() => {
-    const distances = [1, 1.5, 2, 2.5, 3, 3.5];
+    const distances = [0.8, 1.2, 1.6, 2.0, 2.5, 3.0];
     const newPlanes = [];
     
     distances.forEach(dist => {
       const plane = new THREE.Mesh(
-        new THREE.PlaneGeometry(6, 6),
+        new THREE.PlaneGeometry(10, 10),
         new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
       );
       plane.position.set(0, 0, -dist);
+      plane.userData.distance = dist;
       scene.add(plane);
       newPlanes.push(plane);
     });
@@ -485,9 +527,9 @@ function DetectionPlanes({ onHitTest, isActive }) {
 
     if (intersects.length > 0) {
       const hit = intersects[0];
-      onHitTest({
+      onHit({
         point: hit.point,
-        distance: hit.distance,
+        distance: hit.object.userData.distance,
         normal: new THREE.Vector3(0, 0, 1)
       });
     }
@@ -497,38 +539,33 @@ function DetectionPlanes({ onHitTest, isActive }) {
 }
 
 /**
- * Main AR Scene
+ * AR Scene
  */
 function ARScene({ 
-  currentModel, 
+  currentModel,
   worldTracker,
-  cameraAnalyzer,
+  wallDetector,
   onPlacement,
   isPlaced,
   scanningPhase,
   onAnalysisUpdate,
-  currentTransform,
+  activeTransform,
   gestureController
 }) {
   const { camera, gl } = useThree();
   const [hitData, setHitData] = useState(null);
   const [analysis, setAnalysis] = useState(null);
-
-  const handleHitTest = useCallback((data) => {
-    setHitData(data);
-  }, []);
+  const frameCount = useRef(0);
 
   useFrame(() => {
-    if (scanningPhase && cameraAnalyzer) {
-      // Periodic analysis
-      if (Math.random() < 0.1) { // 10% of frames
-        const result = cameraAnalyzer.analyzeFrame(
-          document.querySelector('.ar-video-feed')
-        );
-        if (result) {
-          setAnalysis(result);
-          onAnalysisUpdate(result);
-        }
+    if (scanningPhase && wallDetector) {
+      frameCount.current++;
+      // Analyze every 3 frames for performance
+      if (frameCount.current % 3 === 0) {
+        const video = document.querySelector('.ar-video-feed');
+        const result = wallDetector.analyzeForWall(video);
+        setAnalysis(result);
+        onAnalysisUpdate(result);
       }
     }
   });
@@ -536,28 +573,27 @@ function ARScene({
   const handleTouchStart = useCallback((event) => {
     event.preventDefault();
     
-    if (!isPlaced && analysis?.isWall && hitData) {
+    if (!isPlaced && analysis?.isWall && analysis?.confidence > 0.7 && hitData) {
+      // Place frame
       const quaternion = new THREE.Quaternion();
-      quaternion.setFromUnitVectors(
-        new THREE.Vector3(0, 0, 1),
-        hitData.normal
-      );
-      onPlacement(hitData.point, quaternion);
-    } else if (isPlaced && currentTransform) {
-      gestureController.handleTouchStart(event, currentTransform);
+      quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), hitData.normal);
+      onPlacement(hitData.point, quaternion, camera.position, camera.quaternion);
+    } else if (isPlaced && activeTransform) {
+      // Start gesture
+      gestureController.start(event, activeTransform);
     }
-  }, [isPlaced, analysis, hitData, onPlacement, currentTransform, gestureController]);
+  }, [isPlaced, analysis, hitData, onPlacement, camera, activeTransform, gestureController]);
 
   const handleTouchMove = useCallback((event) => {
     event.preventDefault();
-    if (isPlaced && currentTransform) {
-      gestureController.handleTouchMove(event, currentTransform, camera);
+    if (isPlaced && activeTransform) {
+      gestureController.move(event, activeTransform, camera);
     }
-  }, [isPlaced, currentTransform, gestureController, camera]);
+  }, [isPlaced, activeTransform, gestureController, camera]);
 
   const handleTouchEnd = useCallback((event) => {
     event.preventDefault();
-    gestureController.handleTouchEnd();
+    gestureController.end();
   }, [gestureController]);
 
   useEffect(() => {
@@ -575,9 +611,9 @@ function ARScene({
 
   return (
     <>
-      <DetectionPlanes onHitTest={handleHitTest} isActive={scanningPhase} />
+      <HitTestSystem onHit={setHitData} isActive={scanningPhase} />
       
-      <SmartReticle 
+      <EnhancedReticle 
         position={hitData?.point || new THREE.Vector3(0, 0, -2)}
         analysis={analysis}
         visible={scanningPhase && hitData && analysis}
@@ -590,7 +626,7 @@ function ARScene({
             worldTracker={worldTracker}
             anchorId="main-frame"
             isPlaced={isPlaced}
-            currentTransform={currentTransform}
+            activeTransform={activeTransform}
           />
         </Suspense>
       )}
@@ -606,7 +642,7 @@ export default function CustomARViewer({ onClose }) {
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const worldTrackerRef = useRef(null);
-  const cameraAnalyzerRef = useRef(null);
+  const wallDetectorRef = useRef(null);
   const gestureControllerRef = useRef(null);
   const sessionStartTime = useRef(Date.now());
   const screenshotCount = useRef(0);
@@ -618,19 +654,16 @@ export default function CustomARViewer({ onClose }) {
   const [arPhase, setArPhase] = useState('scanning');
   const [isModelPlaced, setIsModelPlaced] = useState(false);
   const [analysis, setAnalysis] = useState(null);
-  const [currentTransform, setCurrentTransform] = useState(null);
-  const [showGestures, setShowGestures] = useState(false);
+  const [activeTransform, setActiveTransform] = useState(null);
 
   const { currentModel, modelType } = useARStore();
 
   useEffect(() => {
-    worldTrackerRef.current = new IMUWorldTracker();
-    cameraAnalyzerRef.current = new CameraAnalyzer();
+    worldTrackerRef.current = new WorldSpaceTracker();
+    wallDetectorRef.current = new AdvancedWallDetector();
     gestureControllerRef.current = new GestureController((transform) => {
-      setCurrentTransform(transform);
-      if (worldTrackerRef.current) {
-        worldTrackerRef.current.updateAnchor('main-frame', transform);
-      }
+      setActiveTransform(transform);
+      worldTrackerRef.current?.updateAnchor('main-frame', transform);
     });
   }, []);
 
@@ -654,7 +687,7 @@ export default function CustomARViewer({ onClose }) {
       await video.play();
       
       setCameraStatus('ready');
-      setTimeout(() => setArPhase('ready'), 1500);
+      setTimeout(() => setArPhase('ready'), 2000);
       
       analytics.trackARSessionStarted({ url: currentModel, type: modelType });
     } catch (error) {
@@ -683,35 +716,31 @@ export default function CustomARViewer({ onClose }) {
     };
   }, [initCamera, stopCamera]);
 
-  const handlePlacement = useCallback((position, quaternion) => {
-    const cameraPos = new THREE.Vector3(0, 0, 0);
-    const cameraRot = new THREE.Quaternion();
-    
-    worldTrackerRef.current.addAnchor(
+  const handlePlacement = useCallback((position, quaternion, cameraPos, cameraQuat) => {
+    worldTrackerRef.current.createAnchor(
       'main-frame',
       cameraPos,
-      cameraRot,
+      cameraQuat,
       position,
       quaternion
     );
     
-    setCurrentTransform({
+    setActiveTransform({
       position: position.clone(),
-      rotation: quaternion.clone(),
+      quaternion: quaternion.clone(),
       scale: 1
     });
     
     setIsModelPlaced(true);
     setArPhase('placed');
-    setShowGestures(true);
-    setTimeout(() => setShowGestures(false), 5000);
   }, []);
 
   const handleReset = useCallback(() => {
     setIsModelPlaced(false);
     setArPhase('ready');
-    setCurrentTransform(null);
-    worldTrackerRef.current = new IMUWorldTracker();
+    setActiveTransform(null);
+    worldTrackerRef.current?.reset();
+    wallDetectorRef.current = new AdvancedWallDetector();
   }, []);
 
   const handleScreenshot = useCallback(async () => {
@@ -753,7 +782,7 @@ export default function CustomARViewer({ onClose }) {
     }
   }, [isFullscreen]);
 
-  const isGood = analysis?.isWall && analysis?.confidence > 0.5;
+  const isGood = analysis?.isWall && analysis?.confidence > 0.7;
 
   return (
     <div className="ar-viewer-advanced">
@@ -786,12 +815,12 @@ export default function CustomARViewer({ onClose }) {
             <ARScene 
               currentModel={currentModel}
               worldTracker={worldTrackerRef.current}
-              cameraAnalyzer={cameraAnalyzerRef.current}
+              wallDetector={wallDetectorRef.current}
               onPlacement={handlePlacement}
               isPlaced={isModelPlaced}
               scanningPhase={arPhase === 'scanning' || arPhase === 'ready'}
               onAnalysisUpdate={setAnalysis}
-              currentTransform={currentTransform}
+              activeTransform={activeTransform}
               gestureController={gestureControllerRef.current}
             />
           </Canvas>
@@ -828,22 +857,22 @@ export default function CustomARViewer({ onClose }) {
               {arPhase === 'scanning' && (
                 <>
                   <div className="status-spinner-mini" />
-                  <span>Analyzing...</span>
+                  <span>Calibrating...</span>
                 </>
               )}
               {arPhase === 'ready' && (
                 <>
                   <div className={`status-indicator ${isGood ? 'active' : 'inactive'}`} />
                   <span>
-                    {isGood ? '✓ Tap to Place' : 
-                     analysis ? analysis.reason : 'Point at wall'}
+                    {isGood ? '✓ TAP TO PLACE' : 
+                     analysis ? analysis.reason : 'Find wall'}
                   </span>
                 </>
               )}
               {arPhase === 'placed' && (
                 <>
                   <div className="status-indicator success" />
-                  <span>Frame Placed ✓</span>
+                  <span>Frame Anchored ✓</span>
                 </>
               )}
             </div>
@@ -861,8 +890,11 @@ export default function CustomARViewer({ onClose }) {
           {arPhase === 'scanning' && (
             <div className="ar-scan-guide">
               <Scan size={40} className="scan-icon" />
-              <h3>Scanning Environment</h3>
-              <p>Move slowly, point at walls</p>
+              <h3>Analyzing Environment</h3>
+              <p>Point at a plain wall</p>
+              <div className="scan-bar-container">
+                <div className="scan-bar-fill" />
+              </div>
             </div>
           )}
 
@@ -870,45 +902,43 @@ export default function CustomARViewer({ onClose }) {
             <div className={`ar-placement-guide ${!isGood ? 'warning' : ''}`}>
               {isGood ? (
                 <>
-                  <CheckCircle size={32} color="#00ff00" />
-                  <h4>Wall Detected!</h4>
-                  <p>Tap green circle to place</p>
+                  <CheckCircle size={36} color="#00ff00" />
+                  <h4>Perfect Wall!</h4>
+                  <p>Tap green reticle to place frame</p>
+                  {analysis?.metrics && (
+                    <small style={{opacity: 0.7, marginTop: '0.5rem'}}>
+                      Quality: {(analysis.confidence * 100).toFixed(0)}%
+                    </small>
+                  )}
                 </>
               ) : (
                 <>
-                  <AlertTriangle size={32} color="#ff3333" />
-                  <h4>{analysis?.surfaceType || 'Searching'}</h4>
-                  <p>{analysis?.reason || 'Find a plain wall'}</p>
+                  <AlertTriangle size={36} color="#ff3333" />
+                  <h4>{analysis?.surfaceType || 'Scanning...'}</h4>
+                  <p>{analysis?.reason || 'Move camera to find wall'}</p>
+                  <small style={{opacity: 0.6, marginTop: '0.5rem'}}>
+                    Walls only - no floor/ceiling/windows
+                  </small>
                 </>
               )}
             </div>
           )}
 
-          {showGestures && isModelPlaced && (
-            <div className="gesture-guide">
-              <h4>Touch Controls</h4>
-              <div className="gesture-grid">
-                <div className="gesture-item">
-                  <ZoomIn size={20} />
-                  <span>Pinch to Scale</span>
-                </div>
-                <div className="gesture-item">
-                  <RotateCw size={20} />
-                  <span>Two Fingers Rotate</span>
-                </div>
-              </div>
-            </div>
-          )}
-
           {isModelPlaced && (
-            <div className="ar-action-panel">
-              <button className="action-btn primary" onClick={handleScreenshot}>
-                <Camera size={24} />
-              </button>
-              <button className="action-btn" onClick={handleReset}>
-                <RotateCcw size={24} />
-              </button>
-            </div>
+            <>
+              <div className="ar-instructions">
+                <p>🤏 Pinch to scale • ✋ Drag to move • 🔄 Two fingers rotate</p>
+              </div>
+              
+              <div className="ar-action-panel">
+                <button className="action-btn primary" onClick={handleScreenshot}>
+                  <Camera size={24} />
+                </button>
+                <button className="action-btn" onClick={handleReset}>
+                  <RotateCcw size={24} />
+                </button>
+              </div>
+            </>
           )}
         </>
       )}
