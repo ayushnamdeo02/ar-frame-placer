@@ -1,327 +1,203 @@
-/* eslint-disable no-unused-vars */
 /**
- * PROFESSIONAL AR VIEWER WITH ML/CV
- * - WebXR native AR capabilities
- * - TensorFlow.js depth estimation
- * - OpenCV.js edge detection & plane detection
- * - Custom UI with native features
+ * ADVANCED AR VIEWER - Pure Computer Vision
+ * No TensorFlow - Pure JavaScript CV algorithms
  */
 import React, { useEffect, useRef, useState, useCallback, Suspense } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Environment, useGLTF, PerspectiveCamera } from '@react-three/drei';
 import * as THREE from 'three';
-import * as tf from '@tensorflow/tfjs';
-import * as depthEstimation from '@tensorflow-models/depth-estimation';
 import { 
-  X, Camera, Maximize2, Minimize2, RotateCcw, RefreshCw,
-  AlertTriangle, CheckCircle, Zap, Eye
+  X, Camera, RotateCcw, RefreshCw,
+  AlertTriangle, CheckCircle, Zap
 } from 'lucide-react';
 
 import useARStore from '../store/useARStore';
 import analytics from '../services/analytics';
 
 /**
- * ============================================================================
- * ML-POWERED WALL DETECTOR
- * Uses TensorFlow.js depth estimation + OpenCV plane detection
- * ============================================================================
+ * Pure JavaScript Computer Vision Wall Detector
  */
-class MLWallDetector {
+class PureJSWallDetector {
   constructor() {
-    this.depthModel = null;
     this.canvas = document.createElement('canvas');
     this.ctx = this.canvas.getContext('2d');
-    this.isInitialized = false;
     this.history = [];
   }
 
-  async initialize() {
-    if (this.isInitialized) return;
-    
-    console.log('🧠 Loading ML depth estimation model...');
-    
-    try {
-      // Load MiDaS depth estimation model
-      this.depthModel = await depthEstimation.createEstimator(
-        depthEstimation.SupportedModels.ARPortraitDepth,
-        {
-          runtime: 'tfjs',
-          modelType: 'general'
-        }
-      );
-      
-      this.isInitialized = true;
-      console.log('✅ ML model loaded successfully');
-    } catch (error) {
-      console.warn('⚠️ ML model failed, using fallback detection:', error);
-      this.isInitialized = 'fallback';
+  async analyzeForWall(video) {
+    if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) {
+      return { 
+        isWall: false, 
+        confidence: 0, 
+        reason: 'Camera starting...', 
+        surfaceType: 'unknown' 
+      };
     }
-  }
 
-  /**
-   * Analyze depth map to detect walls
-   * Walls have: uniform depth, vertical orientation, low variance
-   */
-  analyzeDepthForWall(depthMap, width, height) {
-    // Focus on center 60% of frame
+    this.canvas.width = 320;
+    this.canvas.height = 240;
+    this.ctx.drawImage(video, 0, 0, this.canvas.width, this.canvas.height);
+    
+    const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+    const data = imageData.data;
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+
+    // Center region analysis
     const startX = Math.floor(width * 0.2);
     const endX = Math.floor(width * 0.8);
     const startY = Math.floor(height * 0.2);
     const endY = Math.floor(height * 0.8);
 
-    let depthSum = 0;
-    let depthCount = 0;
-    const depths = [];
+    let brightSum = 0;
+    let satSum = 0;
+    let edgeCount = 0;
+    let pixelCount = 0;
+    const brightnesses = [];
 
     for (let y = startY; y < endY; y++) {
       for (let x = startX; x < endX; x++) {
-        const depth = depthMap[y * width + x];
-        depthSum += depth;
-        depths.push(depth);
-        depthCount++;
-      }
-    }
-
-    const avgDepth = depthSum / depthCount;
-
-    // Calculate variance
-    let variance = 0;
-    depths.forEach(d => {
-      variance += Math.pow(d - avgDepth, 2);
-    });
-    variance = Math.sqrt(variance / depthCount);
-    const uniformity = 1 / (1 + variance);
-
-    // Analyze vertical gradient (wall = uniform top-to-bottom)
-    let topDepth = 0, bottomDepth = 0;
-    for (let x = startX; x < endX; x++) {
-      topDepth += depthMap[startY * width + x];
-      bottomDepth += depthMap[(endY - 1) * width + x];
-    }
-    topDepth /= (endX - startX);
-    bottomDepth /= (endX - startX);
-    const verticalGradient = Math.abs(bottomDepth - topDepth);
-
-    return {
-      avgDepth,
-      uniformity,
-      verticalGradient,
-      isWall: uniformity > 0.7 && verticalGradient < 0.15 && avgDepth > 0.3
-    };
-  }
-
-  /**
-   * Edge-based plane detection (OpenCV-style)
-   */
-  detectPlaneFromEdges(imageData, width, height) {
-    const data = imageData.data;
-    let edgeCount = 0;
-    let totalPixels = 0;
-
-    // Sobel edge detection
-    for (let y = 1; y < height - 1; y++) {
-      for (let x = 1; x < width - 1; x++) {
         const idx = (y * width + x) * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
         
-        // Get grayscale value
-        const gray = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+        const bright = (r + g + b) / 3;
+        const max = Math.max(r, g, b);
+        const min = Math.min(r, g, b);
+        const sat = max === 0 ? 0 : (max - min) / max;
         
-        // Sobel X
-        const gx = 
-          -data[((y-1) * width + (x-1)) * 4] + data[((y-1) * width + (x+1)) * 4] +
-          -2 * data[(y * width + (x-1)) * 4] + 2 * data[(y * width + (x+1)) * 4] +
-          -data[((y+1) * width + (x-1)) * 4] + data[((y+1) * width + (x+1)) * 4];
-        
-        // Sobel Y
-        const gy = 
-          -data[((y-1) * width + (x-1)) * 4] - 2 * data[((y-1) * width + x) * 4] - data[((y-1) * width + (x+1)) * 4] +
-          data[((y+1) * width + (x-1)) * 4] + 2 * data[((y+1) * width + x) * 4] + data[((y+1) * width + (x+1)) * 4];
-        
-        const edgeMagnitude = Math.sqrt(gx * gx + gy * gy);
-        
-        if (edgeMagnitude > 50) edgeCount++;
-        totalPixels++;
+        brightSum += bright;
+        satSum += sat;
+        brightnesses.push(bright);
+        pixelCount++;
+
+        // Edge detection
+        if (x > startX && y > startY) {
+          const prevIdx = ((y - 1) * width + x) * 4;
+          const diff = Math.abs(data[idx] - data[prevIdx]);
+          if (diff > 40) edgeCount++;
+        }
       }
     }
 
-    const edgeDensity = edgeCount / totalPixels;
+    const avgBright = brightSum / pixelCount;
+    const avgSat = satSum / pixelCount;
+    const edgeDensity = edgeCount / pixelCount;
+
+    // Calculate uniformity
+    let variance = 0;
+    brightnesses.forEach(b => variance += Math.pow(b - avgBright, 2));
+    variance = Math.sqrt(variance / pixelCount);
+    const uniformity = 1 / (1 + variance / 40);
+
+    // Vertical gradient (floor/ceiling detection)
+    let topBright = 0, bottomBright = 0, topCount = 0, bottomCount = 0;
     
-    return {
-      edgeDensity,
-      isPlane: edgeDensity < 0.1 // Low edges = flat plane
-    };
-  }
-
-  /**
-   * Main analysis with ML depth estimation
-   */
-  async analyzeWithML(video) {
-    if (!this.isInitialized || !video || video.readyState !== video.HAVE_ENOUGH_DATA) {
-      return { isWall: false, confidence: 0, reason: 'Initializing ML...', surfaceType: 'unknown' };
-    }
-
-    try {
-      // Capture frame
-      this.canvas.width = 320;
-      this.canvas.height = 240;
-      this.ctx.drawImage(video, 0, 0, this.canvas.width, this.canvas.height);
-      
-      const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
-      
-      let depthAnalysis;
-      
-      if (this.depthModel && this.isInitialized !== 'fallback') {
-        // Use ML depth estimation
-        const depthMap = await this.depthModel.estimateDepth(this.canvas);
-        const depthArray = await depthMap.toArray();
-        
-        depthAnalysis = this.analyzeDepthForWall(
-          depthArray, 
-          this.canvas.width, 
-          this.canvas.height
-        );
-      } else {
-        // Fallback to brightness-based depth
-        depthAnalysis = this.fallbackDepthAnalysis(imageData);
-      }
-
-      // Edge-based plane detection
-      const planeAnalysis = this.detectPlaneFromEdges(
-        imageData, 
-        this.canvas.width, 
-        this.canvas.height
-      );
-
-      // Orientation detection
-      const orientation = this.detectOrientation(imageData);
-
-      // Combine all analyses
-      let isWall = false;
-      let confidence = 0;
-      let reason = '';
-      let surfaceType = 'unknown';
-
-      if (orientation.type === 'floor') {
-        reason = 'Floor detected - aim higher';
-        confidence = 0.1;
-      } else if (orientation.type === 'ceiling') {
-        reason = 'Ceiling detected - aim lower';
-        confidence = 0.1;
-      } else if (depthAnalysis.isWall && planeAnalysis.isPlane) {
-        isWall = true;
-        surfaceType = 'wall';
-        confidence = Math.min(0.95,
-          depthAnalysis.uniformity * 0.4 +
-          (1 - depthAnalysis.verticalGradient) * 0.3 +
-          (1 - planeAnalysis.edgeDensity * 10) * 0.3
-        );
-        reason = 'Wall detected by ML';
-      } else if (planeAnalysis.edgeDensity > 0.15) {
-        surfaceType = 'textured';
-        reason = 'Surface too textured';
-        confidence = 0.2;
-      } else {
-        reason = 'Keep scanning...';
-        confidence = 0.3;
-      }
-
-      // Temporal smoothing
-      this.history.push({ isWall, confidence });
-      if (this.history.length > 8) this.history.shift();
-      
-      const recentWalls = this.history.filter(h => h.isWall).length;
-      const finalIsWall = recentWalls >= 6;
-      
-      if (finalIsWall) {
-        const avgConf = this.history
-          .filter(h => h.isWall)
-          .reduce((sum, h) => sum + h.confidence, 0) / recentWalls;
-        
-        return {
-          isWall: true,
-          confidence: avgConf,
-          surfaceType: 'wall',
-          reason: '✓ Wall confirmed',
-          metrics: {
-            depth: depthAnalysis.avgDepth?.toFixed(2),
-            uniformity: depthAnalysis.uniformity?.toFixed(2),
-            edges: planeAnalysis.edgeDensity?.toFixed(3)
-          }
-        };
-      }
-
-      return { isWall, confidence, surfaceType, reason };
-
-    } catch (error) {
-      console.error('ML analysis error:', error);
-      return this.fallbackAnalysis(video);
-    }
-  }
-
-  /**
-   * Fallback analysis without ML
-   */
-  fallbackAnalysis(video) {
-    this.canvas.width = 160;
-    this.canvas.height = 120;
-    this.ctx.drawImage(video, 0, 0, this.canvas.width, this.canvas.height);
-    
-    const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
-    const depthAnalysis = this.fallbackDepthAnalysis(imageData);
-    const planeAnalysis = this.detectPlaneFromEdges(imageData, this.canvas.width, this.canvas.height);
-    
-    const isWall = depthAnalysis.uniformity > 0.6 && planeAnalysis.isPlane;
-    const confidence = isWall ? 0.7 : 0.3;
-    
-    return {
-      isWall,
-      confidence,
-      surfaceType: isWall ? 'wall' : 'unknown',
-      reason: isWall ? 'Wall detected' : 'Keep scanning'
-    };
-  }
-
-  fallbackDepthAnalysis(imageData) {
-    const data = imageData.data;
-    const pixels = imageData.width * imageData.height;
-    let brightness = 0;
-    
-    for (let i = 0; i < pixels; i++) {
-      brightness += (data[i * 4] + data[i * 4 + 1] + data[i * 4 + 2]) / 3;
-    }
-    brightness /= pixels;
-    
-    return {
-      avgDepth: brightness / 255,
-      uniformity: 0.6,
-      verticalGradient: 0.1,
-      isWall: true
-    };
-  }
-
-  detectOrientation(imageData) {
-    const data = imageData.data;
-    const width = imageData.width;
-    const height = imageData.height;
-    
-    let topBright = 0, bottomBright = 0;
-    
-    for (let x = 0; x < width; x++) {
-      const topIdx = (Math.floor(height * 0.1) * width + x) * 4;
-      const bottomIdx = (Math.floor(height * 0.9) * width + x) * 4;
-      
+    for (let x = startX; x < endX; x++) {
+      const topIdx = (Math.floor(height * 0.15) * width + x) * 4;
+      const bottomIdx = (Math.floor(height * 0.85) * width + x) * 4;
       topBright += (data[topIdx] + data[topIdx + 1] + data[topIdx + 2]) / 3;
       bottomBright += (data[bottomIdx] + data[bottomIdx + 1] + data[bottomIdx + 2]) / 3;
+      topCount++;
+      bottomCount++;
     }
     
-    topBright /= width;
-    bottomBright /= width;
-    
+    topBright /= topCount;
+    bottomBright /= bottomCount;
     const gradient = bottomBright - topBright;
-    
-    if (gradient > 50) return { type: 'floor', gradient };
-    if (gradient < -50) return { type: 'ceiling', gradient };
-    return { type: 'wall', gradient };
+
+    // Decision logic
+    let isWall = false;
+    let confidence = 0;
+    let reason = '';
+    let surfaceType = 'unknown';
+
+    if (avgBright > 230) {
+      surfaceType = 'window';
+      reason = 'Too bright - window';
+      confidence = 0.05;
+    } 
+    else if (avgBright < 25) {
+      surfaceType = 'dark';
+      reason = 'Too dark - add light';
+      confidence = 0.08;
+    }
+    else if (gradient > 60) {
+      surfaceType = 'floor';
+      reason = 'Floor - aim higher';
+      confidence = 0.06;
+    }
+    else if (gradient < -60) {
+      surfaceType = 'ceiling';
+      reason = 'Ceiling - aim lower';
+      confidence = 0.06;
+    }
+    else if (edgeDensity > 0.2) {
+      surfaceType = 'textured';
+      reason = 'Too textured';
+      confidence = 0.15;
+    }
+    else if (
+      uniformity > 0.65 &&
+      edgeDensity < 0.15 &&
+      avgSat < 0.4 &&
+      avgBright > 35 &&
+      avgBright < 225 &&
+      Math.abs(gradient) < 50
+    ) {
+      isWall = true;
+      surfaceType = 'wall';
+      confidence = Math.min(0.96,
+        uniformity * 0.35 +
+        (1 - edgeDensity * 7) * 0.35 +
+        (1 - avgSat) * 0.15 +
+        (1 - Math.abs(gradient) / 100) * 0.15
+      );
+      reason = 'Wall detected';
+    }
+    else {
+      reason = 'Move slowly';
+      confidence = 0.25;
+    }
+
+    // Temporal smoothing
+    this.history.push({ isWall, confidence, surfaceType });
+    if (this.history.length > 10) this.history.shift();
+
+    const recentWalls = this.history.filter(h => h.isWall).length;
+    const finalIsWall = recentWalls >= 7;
+
+    if (finalIsWall) {
+      const wallFrames = this.history.filter(h => h.isWall);
+      const avgConf = wallFrames.reduce((sum, h) => sum + h.confidence, 0) / wallFrames.length;
+      
+      return {
+        isWall: true,
+        confidence: avgConf,
+        surfaceType: 'wall',
+        reason: '✓ Wall confirmed',
+        metrics: {
+          uniformity: uniformity.toFixed(2),
+          brightness: avgBright.toFixed(0),
+          edges: edgeDensity.toFixed(3),
+          frames: `${recentWalls}/10`
+        }
+      };
+    }
+
+    return { 
+      isWall, 
+      confidence, 
+      surfaceType, 
+      reason,
+      metrics: {
+        uniformity: uniformity.toFixed(2),
+        brightness: avgBright.toFixed(0),
+        edges: edgeDensity.toFixed(3),
+        gradient: gradient.toFixed(1)
+      }
+    };
   }
 
   reset() {
@@ -330,192 +206,84 @@ class MLWallDetector {
 }
 
 /**
- * ============================================================================
- * WEBXR SESSION MANAGER
- * Handles native AR sessions with hit-testing
- * ============================================================================
+ * World Anchor System
  */
-class WebXRManager {
+class WorldAnchor {
   constructor() {
-    this.session = null;
-    this.supported = false;
-    this.hitTestSource = null;
-  }
-
-  async checkSupport() {
-    if (!navigator.xr) {
-      console.log('WebXR not supported');
-      return false;
-    }
-
-    try {
-      this.supported = await navigator.xr.isSessionSupported('immersive-ar');
-      console.log('WebXR AR support:', this.supported);
-      return this.supported;
-    } catch (error) {
-      console.error('WebXR check failed:', error);
-      return false;
-    }
-  }
-
-  async startSession(renderer, onHitTest) {
-    if (!this.supported) return false;
-
-    try {
-      this.session = await navigator.xr.requestSession('immersive-ar', {
-        requiredFeatures: ['hit-test'],
-        optionalFeatures: ['dom-overlay', 'light-estimation'],
-        domOverlay: { root: document.body }
-      });
-
-      await renderer.xr.setSession(this.session);
-      
-      // Setup hit-test source
-      const viewerSpace = await this.session.requestReferenceSpace('viewer');
-      this.hitTestSource = await this.session.requestHitTestSource({ space: viewerSpace });
-
-      console.log('✅ WebXR session started');
-      
-      this.session.addEventListener('end', () => {
-        this.hitTestSource = null;
-        this.session = null;
-      });
-
-      return true;
-    } catch (error) {
-      console.error('WebXR session failed:', error);
-      return false;
-    }
-  }
-
-  getHitTestResults(frame) {
-    if (!this.hitTestSource || !frame) return null;
-
-    const hitTestResults = frame.getHitTestResults(this.hitTestSource);
-    if (hitTestResults.length > 0) {
-      const hit = hitTestResults[0];
-      const pose = hit.getPose(frame.getReferenceSpace());
-      
-      if (pose) {
-        const position = new THREE.Vector3(
-          pose.transform.position.x,
-          pose.transform.position.y,
-          pose.transform.position.z
-        );
-        
-        const orientation = new THREE.Quaternion(
-          pose.transform.orientation.x,
-          pose.transform.orientation.y,
-          pose.transform.orientation.z,
-          pose.transform.orientation.w
-        );
-
-        return { position, orientation };
-      }
-    }
-
-    return null;
-  }
-
-  endSession() {
-    if (this.session) {
-      this.session.end();
-    }
-  }
-}
-
-/**
- * ============================================================================
- * TRUE WORLD ANCHOR (improved)
- * ============================================================================
- */
-class ImprovedWorldAnchor {
-  constructor() {
-    this.worldPosition = null;
-    this.worldRotation = null;
+    this.worldPos = null;
+    this.worldRot = null;
     this.scale = 1;
-    this.initialCameraMatrix = new THREE.Matrix4();
+    this.initialCamMatrix = new THREE.Matrix4();
   }
 
   place(camera, position, rotation) {
     camera.updateMatrixWorld(true);
-    this.initialCameraMatrix.copy(camera.matrixWorld);
+    this.initialCamMatrix.copy(camera.matrixWorld);
     
-    this.worldPosition = position.clone();
-    this.worldRotation = rotation.clone();
+    this.worldPos = position.clone();
+    this.worldRot = rotation.clone();
     this.scale = 1;
 
-    console.log('🎯 Anchor placed:', {
-      pos: position.toArray().map(v => v.toFixed(3)),
-      rot: rotation.toArray().map(v => v.toFixed(3))
-    });
+    console.log('🎯 Anchor placed:', position.toArray().map(v => v.toFixed(3)));
   }
 
   getTransform(camera) {
-    if (!this.worldPosition) return null;
+    if (!this.worldPos) return null;
 
     camera.updateMatrixWorld(true);
     
-    // Calculate camera movement
-    const cameraDelta = new THREE.Matrix4()
+    const camDelta = new THREE.Matrix4()
       .copy(camera.matrixWorld)
-      .multiply(this.initialCameraMatrix.clone().invert());
+      .multiply(this.initialCamMatrix.clone().invert());
 
-    // Apply inverse to keep object fixed
-    const inverseCamera = cameraDelta.clone().invert();
-    const fixedPosition = this.worldPosition.clone().applyMatrix4(inverseCamera);
+    const inverseCam = camDelta.clone().invert();
+    const fixedPos = this.worldPos.clone().applyMatrix4(inverseCam);
 
     return {
-      position: fixedPosition,
-      rotation: this.worldRotation.clone(),
+      position: fixedPos,
+      rotation: this.worldRot.clone(),
       scale: this.scale
     };
   }
 
   update(updates) {
-    if (updates.position) this.worldPosition.copy(updates.position);
-    if (updates.rotation) this.worldRotation.copy(updates.rotation);
+    if (updates.position) this.worldPos.copy(updates.position);
+    if (updates.rotation) this.worldRot.copy(updates.rotation);
     if (updates.scale !== undefined) this.scale = updates.scale;
   }
 
   reset() {
-    this.worldPosition = null;
-    this.worldRotation = null;
+    this.worldPos = null;
+    this.worldRot = null;
     this.scale = 1;
-    this.initialCameraMatrix.identity();
+    this.initialCamMatrix.identity();
   }
 }
 
 /**
- * ============================================================================
- * GESTURE HANDLER
- * ============================================================================
+ * Gesture Handler
  */
 class GestureHandler {
   constructor(onChange) {
     this.onChange = onChange;
     this.state = null;
-    this.baseTransform = null;
+    this.base = null;
   }
 
-  start(touches, currentTransform) {
-    this.baseTransform = {
-      position: currentTransform.position.clone(),
-      rotation: currentTransform.rotation.clone(),
-      scale: currentTransform.scale
+  start(touches, current) {
+    this.base = {
+      position: current.position.clone(),
+      rotation: current.rotation.clone(),
+      scale: current.scale
     };
 
     if (touches.length === 1) {
-      this.state = {
-        type: 'drag',
-        startX: touches[0].clientX,
-        startY: touches[0].clientY
-      };
+      this.state = { type: 'drag', x: touches[0].clientX, y: touches[0].clientY };
     } else if (touches.length === 2) {
       const dx = touches[1].clientX - touches[0].clientX;
       const dy = touches[1].clientY - touches[0].clientY;
       this.state = {
-        type: 'pinch-rotate',
+        type: 'pinch',
         distance: Math.sqrt(dx * dx + dy * dy),
         angle: Math.atan2(dy, dx)
       };
@@ -523,58 +291,47 @@ class GestureHandler {
   }
 
   move(touches, camera) {
-    if (!this.state || !this.baseTransform) return;
+    if (!this.state || !this.base) return;
 
     if (this.state.type === 'drag' && touches.length === 1) {
-      const dx = (touches[0].clientX - this.state.startX) * 0.003;
-      const dy = -(touches[0].clientY - this.state.startY) * 0.003;
+      const dx = (touches[0].clientX - this.state.x) * 0.003;
+      const dy = -(touches[0].clientY - this.state.y) * 0.003;
 
       const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
       const up = new THREE.Vector3(0, 1, 0);
 
-      const newPos = this.baseTransform.position.clone()
+      const newPos = this.base.position.clone()
         .add(right.multiplyScalar(dx))
         .add(up.multiplyScalar(dy));
 
-      this.onChange({
-        position: newPos,
-        rotation: this.baseTransform.rotation,
-        scale: this.baseTransform.scale
-      });
-    } 
-    else if (this.state.type === 'pinch-rotate' && touches.length === 2) {
+      this.onChange({ position: newPos, rotation: this.base.rotation, scale: this.base.scale });
+    }
+    else if (this.state.type === 'pinch' && touches.length === 2) {
       const dx = touches[1].clientX - touches[0].clientX;
       const dy = touches[1].clientY - touches[0].clientY;
       const distance = Math.sqrt(dx * dx + dy * dy);
       const angle = Math.atan2(dy, dx);
 
       const scaleRatio = distance / this.state.distance;
-      const newScale = Math.max(0.3, Math.min(4, this.baseTransform.scale * scaleRatio));
+      const newScale = Math.max(0.3, Math.min(4, this.base.scale * scaleRatio));
 
       const angleDelta = angle - this.state.angle;
       const rotQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), angleDelta);
-      const newRot = this.baseTransform.rotation.clone().multiply(rotQuat);
+      const newRot = this.base.rotation.clone().multiply(rotQuat);
 
-      this.onChange({
-        position: this.baseTransform.position,
-        rotation: newRot,
-        scale: newScale
-      });
+      this.onChange({ position: this.base.position, rotation: newRot, scale: newScale });
     }
   }
 
   end() {
     this.state = null;
-    this.baseTransform = null;
+    this.base = null;
   }
 }
 
 /**
- * ============================================================================
- * COMPONENTS
- * ============================================================================
+ * Components
  */
-
 function Reticle({ position, isGood, visible }) {
   const ref = useRef();
   
@@ -685,11 +442,7 @@ function PlacementSystem({ onHit, active }) {
       const hit = intersects[0];
       const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(camera.quaternion);
       
-      onHit({
-        point: hit.point,
-        normal,
-        distance: hit.object.userData.depth
-      });
+      onHit({ point: hit.point, normal, distance: hit.object.userData.depth });
     }
   });
 
@@ -698,7 +451,7 @@ function PlacementSystem({ onHit, active }) {
 
 function ARScene({
   modelUrl, anchor, detector, onPlace, isPlaced,
-  scanning, onAnalysis, gestureTransform, gestureHandler, webxrManager
+  scanning, onAnalysis, gestureTransform, gestureHandler
 }) {
   const { camera, gl } = useThree();
   const [hitData, setHitData] = useState(null);
@@ -710,7 +463,7 @@ function ARScene({
       frame.current++;
       if (frame.current % 3 === 0) {
         const video = document.querySelector('.ar-video');
-        detector.analyzeWithML(video).then(result => {
+        detector.analyzeForWall(video).then(result => {
           setAnalysis(result);
           onAnalysis(result);
         });
@@ -722,7 +475,7 @@ function ARScene({
     e.preventDefault();
     
     if (e.type === 'touchstart') {
-      if (!isPlaced && analysis?.isWall && analysis?.confidence > 0.7 && hitData) {
+      if (!isPlaced && analysis?.isWall && analysis?.confidence > 0.75 && hitData) {
         const rotation = new THREE.Quaternion();
         rotation.setFromUnitVectors(new THREE.Vector3(0, 0, 1), hitData.normal);
         onPlace(hitData.point, rotation);
@@ -750,7 +503,7 @@ function ARScene({
     };
   }, [gl, handleTouch]);
 
-  const isGood = analysis?.isWall && analysis?.confidence > 0.7;
+  const isGood = analysis?.isWall && analysis?.confidence > 0.75;
 
   return (
     <>
@@ -775,9 +528,7 @@ function ARScene({
 }
 
 /**
- * ============================================================================
- * MAIN COMPONENT
- * ============================================================================
+ * Main Component
  */
 export default function CustomARViewer({ onClose }) {
   const videoRef = useRef(null);
@@ -786,7 +537,6 @@ export default function CustomARViewer({ onClose }) {
   const anchorRef = useRef(null);
   const detectorRef = useRef(null);
   const gestureRef = useRef(null);
-  const webxrRef = useRef(null);
   const sessionStart = useRef(Date.now());
   const screenshots = useRef(0);
 
@@ -796,31 +546,18 @@ export default function CustomARViewer({ onClose }) {
   const [placed, setPlaced] = useState(false);
   const [analysis, setAnalysis] = useState(null);
   const [gestureTransform, setGestureTransform] = useState(null);
-  const [mlReady, setMlReady] = useState(false);
-  const [useWebXR, setUseWebXR] = useState(false);
 
   const { currentModel, modelType } = useARStore();
 
   useEffect(() => {
-    anchorRef.current = new ImprovedWorldAnchor();
-    detectorRef.current = new MLWallDetector();
+    anchorRef.current = new WorldAnchor();
+    detectorRef.current = new PureJSWallDetector();
     gestureRef.current = new GestureHandler((t) => {
       setGestureTransform(t);
       anchorRef.current?.update(t);
     });
-    webxrRef.current = new WebXRManager();
-
-    // Initialize ML
-    detectorRef.current.initialize().then(() => {
-      setMlReady(true);
-      console.log('✅ ML detector ready');
-    });
-
-    // Check WebXR support
-    webxrRef.current.checkSupport().then(supported => {
-      setUseWebXR(supported);
-      console.log('WebXR support:', supported);
-    });
+    
+    console.log('✅ Pure JS CV Detector initialized');
   }, []);
 
   const startCamera = useCallback(async () => {
@@ -912,14 +649,36 @@ export default function CustomARViewer({ onClose }) {
     }, 'image/png');
   }, []);
 
-  const isGood = analysis?.isWall && analysis?.confidence > 0.7;
+  const isGood = analysis?.isWall && analysis?.confidence > 0.75;
 
   return (
     <div className="ar-viewer-advanced">
-      <video ref={videoRef} autoPlay playsInline muted className="ar-video" />
+      <video 
+        ref={videoRef} 
+        autoPlay 
+        playsInline 
+        muted 
+        className="ar-video" 
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          objectFit: 'cover',
+          zIndex: 1
+        }}
+      />
 
       {ready && (
-        <div ref={canvasRef} className="ar-canvas-layer">
+        <div ref={canvasRef} className="ar-canvas-layer" style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          zIndex: 2
+        }}>
           <Canvas
             gl={{ alpha: true, antialias: true, preserveDrawingBuffer: true }}
             style={{ background: 'transparent' }}
@@ -943,7 +702,6 @@ export default function CustomARViewer({ onClose }) {
               onAnalysis={setAnalysis}
               gestureTransform={gestureTransform}
               gestureHandler={gestureRef.current}
-              webxrManager={webxrRef.current}
             />
           </Canvas>
         </div>
@@ -952,9 +710,8 @@ export default function CustomARViewer({ onClose }) {
       {!ready && !error && (
         <div className="ar-loading-screen">
           <div className="loading-ring"></div>
-          <h3>Initializing AR</h3>
-          <p>Loading ML models...</p>
-          {mlReady && <small style={{color: '#00ff00'}}>✓ ML Ready</small>}
+          <h3>Starting AR</h3>
+          <p>Initializing Pure JS CV...</p>
         </div>
       )}
 
@@ -979,7 +736,7 @@ export default function CustomARViewer({ onClose }) {
             <div className="ar-status-pill">
               {phase === 'scan' && (
                 <>
-                  {mlReady ? <Zap size={18} color="#00ff00" /> : <Eye size={18} />}
+                  <Zap size={18} color={isGood ? "#00ff00" : "#888"} />
                   <span>{isGood ? 'TAP TO PLACE' : analysis?.reason || 'Scanning...'}</span>
                 </>
               )}
@@ -990,14 +747,6 @@ export default function CustomARViewer({ onClose }) {
                 </>
               )}
             </div>
-
-            <div className="ar-actions-bar">
-              {mlReady && (
-                <span style={{fontSize: '10px', color: '#00ff00', marginRight: '8px'}}>
-                  ML
-                </span>
-              )}
-            </div>
           </header>
 
           {phase === 'scan' && (
@@ -1005,18 +754,18 @@ export default function CustomARViewer({ onClose }) {
               {isGood ? (
                 <>
                   <CheckCircle size={48} color="#00ff00" />
-                  <h3>Wall Detected!</h3>
+                  <h3>Wall Found!</h3>
                   <p>Tap green target to place</p>
-                  <small>ML Confidence: {(analysis.confidence * 100).toFixed(0)}%</small>
+                  <small>Confidence: {(analysis.confidence * 100).toFixed(0)}%</small>
                 </>
               ) : (
                 <>
                   <AlertTriangle size={48} color="#ff3333" />
                   <h3>{analysis?.surfaceType?.toUpperCase() || 'SCANNING'}</h3>
-                  <p>{analysis?.reason || 'Point at wall'}</p>
+                  <p>{analysis?.reason || 'Point at plain wall'}</p>
                   {analysis?.metrics && (
-                    <small style={{opacity: 0.7}}>
-                      Depth: {analysis.metrics.depth} | Edges: {analysis.metrics.edges}
+                    <small style={{opacity: 0.7, fontSize: '11px'}}>
+                      Bright: {analysis.metrics.brightness} | Edges: {analysis.metrics.edges} | Uni: {analysis.metrics.uniformity}
                     </small>
                   )}
                 </>
