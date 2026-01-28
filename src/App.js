@@ -1,6 +1,6 @@
 // src/App.js
 import React, { useState } from 'react';
-import WebXRARViewer from './components/ARViewer';
+import AdvancedWebAR from './components/AdvancedWebAR';
 import HomePage from './components/HomePage';
 import UploadPage from './components/UploadPage';
 import useARStore from './store/useARStore';
@@ -15,7 +15,7 @@ function App() {
       {currentView === 'home' && <HomePage onNavigate={setCurrentView} />}
       {currentView === 'upload' && <UploadPage onNavigate={setCurrentView} />}
       {currentView === 'ar' && currentModel && (
-        <WebXRARViewer onClose={() => setCurrentView('upload')} />
+        <AdvancedWebAR onClose={() => setCurrentView('upload')} />
       )}
     </div>
   );
