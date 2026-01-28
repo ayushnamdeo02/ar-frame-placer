@@ -1,41 +1,42 @@
-/**
- * ADVANCED AR VIEWER - Pure Computer Vision
- * No TensorFlow - Pure JavaScript CV algorithms
- */
+/* eslint-disable no-unused-vars */
 import React, { useEffect, useRef, useState, useCallback, Suspense } from 'react';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { Canvas, useFrame, useThree, extend } from '@react-three/fiber';
 import { Environment, useGLTF, PerspectiveCamera } from '@react-three/drei';
 import * as THREE from 'three';
 import { 
-  X, Camera, RotateCcw, RefreshCw,
-  AlertTriangle, CheckCircle, Zap
+  X, Camera, RotateCcw, RefreshCw, Maximize2,
+  AlertTriangle, CheckCircle, Zap, Crosshair, Move
 } from 'lucide-react';
 
 import useARStore from '../store/useARStore';
 import analytics from '../services/analytics';
 
 /**
- * Pure JavaScript Computer Vision Wall Detector
+ * ============================================================================
+ * ADVANCED WALL DETECTION - IMPROVED ALGORITHM
+ * ============================================================================
  */
-class PureJSWallDetector {
+class AdvancedWallDetector {
   constructor() {
     this.canvas = document.createElement('canvas');
     this.ctx = this.canvas.getContext('2d');
     this.history = [];
+    this.debugMode = true;
   }
 
-  async analyzeForWall(video) {
+  async analyzeFrame(video) {
     if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) {
       return { 
         isWall: false, 
         confidence: 0, 
-        reason: 'Camera starting...', 
+        reason: 'Initializing camera...', 
         surfaceType: 'unknown' 
       };
     }
 
-    this.canvas.width = 320;
-    this.canvas.height = 240;
+    // Use higher resolution for better accuracy
+    this.canvas.width = 480;
+    this.canvas.height = 360;
     this.ctx.drawImage(video, 0, 0, this.canvas.width, this.canvas.height);
     
     const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
@@ -43,24 +44,59 @@ class PureJSWallDetector {
     const width = this.canvas.width;
     const height = this.canvas.height;
 
-    // Center region analysis
-    const startX = Math.floor(width * 0.2);
-    const endX = Math.floor(width * 0.8);
-    const startY = Math.floor(height * 0.2);
-    const endY = Math.floor(height * 0.8);
+    // Multi-region analysis for better accuracy
+    const regions = this.analyzeRegions(data, width, height);
+    const edges = this.detectEdges(data, width, height);
+    const orientation = this.detectOrientation(data, width, height);
+    const texture = this.analyzeTexture(data, width, height);
+    const depth = this.estimateDepth(data, width, height);
 
-    let brightSum = 0;
-    let satSum = 0;
-    let edgeCount = 0;
-    let pixelCount = 0;
-    const brightnesses = [];
+    // Decision engine
+    const result = this.evaluateWallConfidence(regions, edges, orientation, texture, depth);
+
+    // Temporal filtering
+    this.history.push(result);
+    if (this.history.length > 12) this.history.shift();
+
+    const smoothed = this.temporalSmoothing();
+
+    if (this.debugMode) {
+      console.log('🔍 Wall Detection:', {
+        surface: smoothed.surfaceType,
+        conf: (smoothed.confidence * 100).toFixed(0) + '%',
+        reason: smoothed.reason,
+        frames: this.history.filter(h => h.isWall).length + '/12'
+      });
+    }
+
+    return smoothed;
+  }
+
+  analyzeRegions(data, width, height) {
+    const regions = {
+      center: this.analyzeRegion(data, width, height, 0.3, 0.7, 0.3, 0.7),
+      top: this.analyzeRegion(data, width, height, 0.2, 0.8, 0.1, 0.3),
+      bottom: this.analyzeRegion(data, width, height, 0.2, 0.8, 0.7, 0.9),
+      left: this.analyzeRegion(data, width, height, 0.1, 0.3, 0.3, 0.7),
+      right: this.analyzeRegion(data, width, height, 0.7, 0.9, 0.3, 0.7)
+    };
+
+    return regions;
+  }
+
+  analyzeRegion(data, width, height, x1, x2, y1, y2) {
+    const startX = Math.floor(width * x1);
+    const endX = Math.floor(width * x2);
+    const startY = Math.floor(height * y1);
+    const endY = Math.floor(height * y2);
+
+    let brightSum = 0, satSum = 0, count = 0;
+    const values = [];
 
     for (let y = startY; y < endY; y++) {
       for (let x = startX; x < endX; x++) {
         const idx = (y * width + x) * 4;
-        const r = data[idx];
-        const g = data[idx + 1];
-        const b = data[idx + 2];
+        const r = data[idx], g = data[idx + 1], b = data[idx + 2];
         
         const bright = (r + g + b) / 3;
         const max = Math.max(r, g, b);
@@ -69,106 +105,203 @@ class PureJSWallDetector {
         
         brightSum += bright;
         satSum += sat;
-        brightnesses.push(bright);
-        pixelCount++;
-
-        // Edge detection
-        if (x > startX && y > startY) {
-          const prevIdx = ((y - 1) * width + x) * 4;
-          const diff = Math.abs(data[idx] - data[prevIdx]);
-          if (diff > 40) edgeCount++;
-        }
+        values.push(bright);
+        count++;
       }
     }
 
-    const avgBright = brightSum / pixelCount;
-    const avgSat = satSum / pixelCount;
-    const edgeDensity = edgeCount / pixelCount;
+    const avgBright = brightSum / count;
+    const avgSat = satSum / count;
 
-    // Calculate uniformity
+    // Calculate variance (uniformity)
     let variance = 0;
-    brightnesses.forEach(b => variance += Math.pow(b - avgBright, 2));
-    variance = Math.sqrt(variance / pixelCount);
-    const uniformity = 1 / (1 + variance / 40);
+    values.forEach(v => variance += Math.pow(v - avgBright, 2));
+    variance = Math.sqrt(variance / count);
+    const uniformity = Math.max(0, 1 - variance / 80);
 
-    // Vertical gradient (floor/ceiling detection)
-    let topBright = 0, bottomBright = 0, topCount = 0, bottomCount = 0;
-    
-    for (let x = startX; x < endX; x++) {
-      const topIdx = (Math.floor(height * 0.15) * width + x) * 4;
-      const bottomIdx = (Math.floor(height * 0.85) * width + x) * 4;
-      topBright += (data[topIdx] + data[topIdx + 1] + data[topIdx + 2]) / 3;
-      bottomBright += (data[bottomIdx] + data[bottomIdx + 1] + data[bottomIdx + 2]) / 3;
-      topCount++;
-      bottomCount++;
+    return { avgBright, avgSat, uniformity, variance };
+  }
+
+  detectEdges(data, width, height) {
+    let strongEdges = 0, weakEdges = 0, totalPixels = 0;
+
+    for (let y = 2; y < height - 2; y++) {
+      for (let x = 2; x < width - 2; x++) {
+        const idx = (y * width + x) * 4;
+        
+        // Sobel operator
+        const gx = 
+          -data[((y-1) * width + (x-1)) * 4] + data[((y-1) * width + (x+1)) * 4] +
+          -2 * data[(y * width + (x-1)) * 4] + 2 * data[(y * width + (x+1)) * 4] +
+          -data[((y+1) * width + (x-1)) * 4] + data[((y+1) * width + (x+1)) * 4];
+        
+        const gy = 
+          -data[((y-1) * width + (x-1)) * 4] - 2 * data[((y-1) * width + x) * 4] - data[((y-1) * width + (x+1)) * 4] +
+          data[((y+1) * width + (x-1)) * 4] + 2 * data[((y+1) * width + x) * 4] + data[((y+1) * width + (x+1)) * 4];
+        
+        const magnitude = Math.sqrt(gx * gx + gy * gy);
+        
+        if (magnitude > 80) strongEdges++;
+        else if (magnitude > 40) weakEdges++;
+        totalPixels++;
+      }
     }
-    
-    topBright /= topCount;
-    bottomBright /= bottomCount;
-    const gradient = bottomBright - topBright;
 
-    // Decision logic
+    return {
+      strongDensity: strongEdges / totalPixels,
+      weakDensity: weakEdges / totalPixels,
+      totalDensity: (strongEdges + weakEdges) / totalPixels
+    };
+  }
+
+  detectOrientation(data, width, height) {
+    // Sample multiple horizontal strips
+    const strips = 8;
+    const stripBrightness = [];
+    
+    for (let s = 0; s < strips; s++) {
+      const y = Math.floor((height / strips) * s + height / (strips * 2));
+      let brightness = 0, count = 0;
+      
+      for (let x = Math.floor(width * 0.25); x < Math.floor(width * 0.75); x++) {
+        const idx = (y * width + x) * 4;
+        brightness += (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+        count++;
+      }
+      
+      stripBrightness.push(brightness / count);
+    }
+
+    const topAvg = (stripBrightness[0] + stripBrightness[1] + stripBrightness[2]) / 3;
+    const bottomAvg = (stripBrightness[5] + stripBrightness[6] + stripBrightness[7]) / 3;
+    const gradient = bottomAvg - topAvg;
+
+    let orientation = 'wall';
+    if (gradient > 45) orientation = 'floor';
+    else if (gradient < -45) orientation = 'ceiling';
+
+    return { orientation, gradient, stripBrightness };
+  }
+
+  analyzeTexture(data, width, height) {
+    const startX = Math.floor(width * 0.3);
+    const endX = Math.floor(width * 0.7);
+    const startY = Math.floor(height * 0.3);
+    const endY = Math.floor(height * 0.7);
+
+    let textureSum = 0, count = 0;
+
+    for (let y = startY + 1; y < endY - 1; y++) {
+      for (let x = startX + 1; x < endX - 1; x++) {
+        const idx = (y * width + x) * 4;
+        const center = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+        
+        // Calculate Laplacian (texture measure)
+        const top = (data[((y-1) * width + x) * 4] + data[((y-1) * width + x) * 4 + 1] + data[((y-1) * width + x) * 4 + 2]) / 3;
+        const bottom = (data[((y+1) * width + x) * 4] + data[((y+1) * width + x) * 4 + 1] + data[((y+1) * width + x) * 4 + 2]) / 3;
+        const left = (data[(y * width + (x-1)) * 4] + data[(y * width + (x-1)) * 4 + 1] + data[(y * width + (x-1)) * 4 + 2]) / 3;
+        const right = (data[(y * width + (x+1)) * 4] + data[(y * width + (x+1)) * 4 + 1] + data[(y * width + (x+1)) * 4 + 2]) / 3;
+        
+        const laplacian = Math.abs(4 * center - top - bottom - left - right);
+        textureSum += laplacian;
+        count++;
+      }
+    }
+
+    const avgTexture = textureSum / count;
+    const textureScore = Math.min(avgTexture / 30, 1);
+
+    return { avgTexture, textureScore };
+  }
+
+  estimateDepth(data, width, height) {
+    const center = this.analyzeRegion(data, width, height, 0.4, 0.6, 0.4, 0.6);
+    
+    // Depth heuristic: bright + low saturation = far (wall)
+    const depthScore = (center.avgBright / 255) * 0.6 + (1 - center.avgSat) * 0.4;
+    
+    return { depthScore, brightness: center.avgBright, saturation: center.avgSat };
+  }
+
+  evaluateWallConfidence(regions, edges, orientation, texture, depth) {
     let isWall = false;
     let confidence = 0;
     let reason = '';
     let surfaceType = 'unknown';
 
-    if (avgBright > 230) {
+    const bright = regions.center.avgBright;
+    const uniformity = regions.center.uniformity;
+    const edgeDensity = edges.totalDensity;
+    const texScore = texture.textureScore;
+    const grad = orientation.gradient;
+
+    // Rule-based classification
+    if (bright > 240) {
       surfaceType = 'window';
-      reason = 'Too bright - window';
+      reason = '🪟 Window/Sky - too bright';
       confidence = 0.05;
-    } 
-    else if (avgBright < 25) {
+    }
+    else if (bright < 20) {
       surfaceType = 'dark';
-      reason = 'Too dark - add light';
+      reason = '🌑 Too dark - need light';
+      confidence = 0.05;
+    }
+    else if (grad > 50) {
+      surfaceType = 'floor';
+      reason = '⬇️ Floor detected - aim higher';
       confidence = 0.08;
     }
-    else if (gradient > 60) {
-      surfaceType = 'floor';
-      reason = 'Floor - aim higher';
-      confidence = 0.06;
-    }
-    else if (gradient < -60) {
+    else if (grad < -50) {
       surfaceType = 'ceiling';
-      reason = 'Ceiling - aim lower';
-      confidence = 0.06;
+      reason = '⬆️ Ceiling detected - aim lower';
+      confidence = 0.08;
     }
-    else if (edgeDensity > 0.2) {
+    else if (edgeDensity > 0.25) {
       surfaceType = 'textured';
-      reason = 'Too textured';
+      reason = '🎨 Too textured - find plain wall';
+      confidence = 0.12;
+    }
+    else if (texScore > 0.7) {
+      surfaceType = 'pattern';
+      reason = '🔲 Pattern detected - find plain area';
       confidence = 0.15;
     }
     else if (
-      uniformity > 0.65 &&
-      edgeDensity < 0.15 &&
-      avgSat < 0.4 &&
-      avgBright > 35 &&
-      avgBright < 225 &&
-      Math.abs(gradient) < 50
+      uniformity > 0.62 &&
+      edgeDensity < 0.18 &&
+      texScore < 0.6 &&
+      regions.center.avgSat < 0.45 &&
+      bright > 30 && bright < 235 &&
+      Math.abs(grad) < 45
     ) {
       isWall = true;
       surfaceType = 'wall';
-      confidence = Math.min(0.96,
-        uniformity * 0.35 +
-        (1 - edgeDensity * 7) * 0.35 +
-        (1 - avgSat) * 0.15 +
-        (1 - Math.abs(gradient) / 100) * 0.15
+      
+      // Calculate confidence score
+      confidence = Math.min(0.98,
+        uniformity * 0.30 +
+        (1 - edgeDensity * 5.5) * 0.25 +
+        (1 - texScore) * 0.20 +
+        (1 - regions.center.avgSat) * 0.15 +
+        (1 - Math.abs(grad) / 90) * 0.10
       );
-      reason = 'Wall detected';
+      
+      reason = '✅ Wall detected';
     }
     else {
-      reason = 'Move slowly';
+      surfaceType = 'uncertain';
+      reason = '🔄 Move camera slowly';
       confidence = 0.25;
     }
 
-    // Temporal smoothing
-    this.history.push({ isWall, confidence, surfaceType });
-    if (this.history.length > 10) this.history.shift();
+    return { isWall, confidence, surfaceType, reason };
+  }
 
+  temporalSmoothing() {
     const recentWalls = this.history.filter(h => h.isWall).length;
-    const finalIsWall = recentWalls >= 7;
+    const threshold = 8; // Need 8/12 frames
 
-    if (finalIsWall) {
+    if (recentWalls >= threshold) {
       const wallFrames = this.history.filter(h => h.isWall);
       const avgConf = wallFrames.reduce((sum, h) => sum + h.confidence, 0) / wallFrames.length;
       
@@ -176,28 +309,14 @@ class PureJSWallDetector {
         isWall: true,
         confidence: avgConf,
         surfaceType: 'wall',
-        reason: '✓ Wall confirmed',
-        metrics: {
-          uniformity: uniformity.toFixed(2),
-          brightness: avgBright.toFixed(0),
-          edges: edgeDensity.toFixed(3),
-          frames: `${recentWalls}/10`
-        }
+        reason: `✓ Wall confirmed (${recentWalls}/12)`,
+        stable: true
       };
     }
 
-    return { 
-      isWall, 
-      confidence, 
-      surfaceType, 
-      reason,
-      metrics: {
-        uniformity: uniformity.toFixed(2),
-        brightness: avgBright.toFixed(0),
-        edges: edgeDensity.toFixed(3),
-        gradient: gradient.toFixed(1)
-      }
-    };
+    // Return most recent result
+    const latest = this.history[this.history.length - 1];
+    return { ...latest, stable: false };
   }
 
   reset() {
@@ -206,7 +325,103 @@ class PureJSWallDetector {
 }
 
 /**
- * World Anchor System
+ * ============================================================================
+ * WEBXR NATIVE AR MANAGER
+ * ============================================================================
+ */
+class WebXRManager {
+  constructor() {
+    this.session = null;
+    this.supported = false;
+    this.hitTestSource = null;
+    this.referenceSpace = null;
+  }
+
+  async checkSupport() {
+    if (!navigator.xr) {
+      console.log('❌ WebXR not available');
+      return false;
+    }
+
+    try {
+      this.supported = await navigator.xr.isSessionSupported('immersive-ar');
+      console.log('✅ WebXR AR support:', this.supported);
+      return this.supported;
+    } catch (error) {
+      console.error('WebXR check failed:', error);
+      return false;
+    }
+  }
+
+  async startSession(gl) {
+    if (!this.supported) return false;
+
+    try {
+      this.session = await navigator.xr.requestSession('immersive-ar', {
+        requiredFeatures: ['hit-test'],
+        optionalFeatures: ['dom-overlay', 'light-estimation', 'anchors']
+      });
+
+      gl.xr.setSession(this.session);
+      
+      this.referenceSpace = await this.session.requestReferenceSpace('local');
+      const viewerSpace = await this.session.requestReferenceSpace('viewer');
+      this.hitTestSource = await this.session.requestHitTestSource({ space: viewerSpace });
+
+      console.log('✅ WebXR session started');
+      
+      this.session.addEventListener('end', () => {
+        this.cleanup();
+      });
+
+      return true;
+    } catch (error) {
+      console.error('WebXR session failed:', error);
+      return false;
+    }
+  }
+
+  getHitTestResults(frame) {
+    if (!this.hitTestSource || !frame) return null;
+
+    try {
+      const hitTestResults = frame.getHitTestResults(this.hitTestSource);
+      if (hitTestResults.length > 0) {
+        const hit = hitTestResults[0];
+        const pose = hit.getPose(this.referenceSpace);
+        
+        if (pose) {
+          return {
+            position: new THREE.Vector3().copy(pose.transform.position),
+            orientation: new THREE.Quaternion().copy(pose.transform.orientation)
+          };
+        }
+      }
+    } catch (error) {
+      console.error('Hit test error:', error);
+    }
+
+    return null;
+  }
+
+  cleanup() {
+    this.hitTestSource = null;
+    this.referenceSpace = null;
+    this.session = null;
+    console.log('WebXR session ended');
+  }
+
+  endSession() {
+    if (this.session) {
+      this.session.end();
+    }
+  }
+}
+
+/**
+ * ============================================================================
+ * WORLD ANCHOR SYSTEM
+ * ============================================================================
  */
 class WorldAnchor {
   constructor() {
@@ -224,7 +439,7 @@ class WorldAnchor {
     this.worldRot = rotation.clone();
     this.scale = 1;
 
-    console.log('🎯 Anchor placed:', position.toArray().map(v => v.toFixed(3)));
+    console.log('🎯 Anchor placed at:', position.toArray().map(v => v.toFixed(2)));
   }
 
   getTransform(camera) {
@@ -261,9 +476,11 @@ class WorldAnchor {
 }
 
 /**
- * Gesture Handler
+ * ============================================================================
+ * GESTURE CONTROLS
+ * ============================================================================
  */
-class GestureHandler {
+class GestureController {
   constructor(onChange) {
     this.onChange = onChange;
     this.state = null;
@@ -278,7 +495,11 @@ class GestureHandler {
     };
 
     if (touches.length === 1) {
-      this.state = { type: 'drag', x: touches[0].clientX, y: touches[0].clientY };
+      this.state = { 
+        type: 'drag', 
+        x: touches[0].clientX, 
+        y: touches[0].clientY 
+      };
     } else if (touches.length === 2) {
       const dx = touches[1].clientX - touches[0].clientX;
       const dy = touches[1].clientY - touches[0].clientY;
@@ -294,8 +515,8 @@ class GestureHandler {
     if (!this.state || !this.base) return;
 
     if (this.state.type === 'drag' && touches.length === 1) {
-      const dx = (touches[0].clientX - this.state.x) * 0.003;
-      const dy = -(touches[0].clientY - this.state.y) * 0.003;
+      const dx = (touches[0].clientX - this.state.x) * 0.004;
+      const dy = -(touches[0].clientY - this.state.y) * 0.004;
 
       const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
       const up = new THREE.Vector3(0, 1, 0);
@@ -313,10 +534,13 @@ class GestureHandler {
       const angle = Math.atan2(dy, dx);
 
       const scaleRatio = distance / this.state.distance;
-      const newScale = Math.max(0.3, Math.min(4, this.base.scale * scaleRatio));
+      const newScale = Math.max(0.2, Math.min(5, this.base.scale * scaleRatio));
 
       const angleDelta = angle - this.state.angle;
-      const rotQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), angleDelta);
+      const rotQuat = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 0, 1), 
+        angleDelta
+      );
       const newRot = this.base.rotation.clone().multiply(rotQuat);
 
       this.onChange({ position: this.base.position, rotation: newRot, scale: newScale });
@@ -330,36 +554,63 @@ class GestureHandler {
 }
 
 /**
- * Components
+ * ============================================================================
+ * 3D COMPONENTS
+ * ============================================================================
  */
+
 function Reticle({ position, isGood, visible }) {
   const ref = useRef();
   
   useFrame(({ clock }) => {
     if (ref.current && visible) {
-      ref.current.rotation.z = clock.elapsedTime * 0.6;
+      ref.current.rotation.z = clock.elapsedTime * 0.5;
+      const pulse = 0.95 + Math.sin(clock.elapsedTime * 3) * 0.05;
+      ref.current.scale.setScalar(pulse);
     }
   });
 
   if (!visible) return null;
 
-  const color = isGood ? '#00ff00' : '#ff4444';
+  const color = isGood ? '#00ff00' : '#ff9500';
+  const size = isGood ? 0.025 : 0.02;
   
   return (
     <group position={position} ref={ref}>
+      {/* Center dot */}
       <mesh renderOrder={1000}>
-        <circleGeometry args={[0.02, 32]} />
-        <meshBasicMaterial color={color} transparent opacity={1} depthTest={false} />
+        <circleGeometry args={[size, 32]} />
+        <meshBasicMaterial 
+          color={color} 
+          transparent 
+          opacity={1} 
+          depthTest={false} 
+        />
       </mesh>
+      
+      {/* Ring */}
       <mesh renderOrder={999}>
         <ringGeometry args={[0.08, 0.09, 32]} />
-        <meshBasicMaterial color={color} transparent opacity={0.9} side={THREE.DoubleSide} depthTest={false} />
+        <meshBasicMaterial 
+          color={color} 
+          transparent 
+          opacity={isGood ? 1 : 0.7} 
+          side={THREE.DoubleSide} 
+          depthTest={false} 
+        />
       </mesh>
-      {isGood && [0, 90, 180, 270].map((a, i) => (
-        <group key={i} rotation={[0, 0, (a * Math.PI) / 180]}>
+      
+      {/* Corner brackets */}
+      {isGood && [0, 90, 180, 270].map((angle, i) => (
+        <group key={i} rotation={[0, 0, (angle * Math.PI) / 180]}>
           <mesh position={[0.15, 0, 0]} renderOrder={998}>
-            <planeGeometry args={[0.05, 0.01]} />
-            <meshBasicMaterial color={color} transparent opacity={0.95} depthTest={false} />
+            <planeGeometry args={[0.06, 0.012]} />
+            <meshBasicMaterial 
+              color={color} 
+              transparent 
+              opacity={1} 
+              depthTest={false} 
+            />
           </mesh>
         </group>
       ))}
@@ -367,17 +618,18 @@ function Reticle({ position, isGood, visible }) {
   );
 }
 
-function AnchoredModel({ url, anchor, isPlaced, gestureTransform }) {
+function Model3D({ url, anchor, isPlaced, gestureTransform }) {
   const ref = useRef();
   const gltf = useGLTF(url);
-  const [scale, setScale] = useState(1);
+  const [normalizedScale, setNormalizedScale] = useState(1);
   const { camera } = useThree();
 
   useEffect(() => {
     if (gltf?.scene) {
       const box = new THREE.Box3().setFromObject(gltf.scene);
       const size = box.getSize(new THREE.Vector3());
-      setScale(0.5 / Math.max(size.x, size.y, size.z));
+      const maxDim = Math.max(size.x, size.y, size.z);
+      setNormalizedScale(0.6 / maxDim);
     }
   }, [gltf]);
 
@@ -389,20 +641,25 @@ function AnchoredModel({ url, anchor, isPlaced, gestureTransform }) {
 
     ref.current.position.copy(transform.position);
     ref.current.quaternion.copy(transform.rotation);
-    ref.current.scale.setScalar(transform.scale * scale);
+    ref.current.scale.setScalar(transform.scale * normalizedScale);
   });
 
   if (!gltf?.scene) return null;
 
   const scene = gltf.scene.clone(true);
+  
   scene.traverse((child) => {
     if (child.isMesh) {
       child.castShadow = true;
       child.receiveShadow = true;
-      if (child.material) child.material.side = THREE.DoubleSide;
+      if (child.material) {
+        child.material.side = THREE.DoubleSide;
+        child.material.needsUpdate = true;
+      }
     }
   });
 
+  // Center the model
   const box = new THREE.Box3().setFromObject(scene);
   const center = box.getCenter(new THREE.Vector3());
   scene.position.sub(center);
@@ -410,16 +667,19 @@ function AnchoredModel({ url, anchor, isPlaced, gestureTransform }) {
   return <primitive ref={ref} object={scene} />;
 }
 
-function PlacementSystem({ onHit, active }) {
-  const { camera, scene } = useThree();
+function HitTestSystem({ onHit, active, useWebXR, webxrManager }) {
+  const { camera, scene, gl } = useThree();
   const raycaster = useRef(new THREE.Raycaster());
   const planes = useRef([]);
 
   useEffect(() => {
-    const depths = [0.8, 1.2, 1.6, 2.0, 2.5, 3.0, 3.5];
+    if (useWebXR) return; // Use WebXR hit testing instead
+
+    // Create virtual planes at different depths
+    const depths = [0.5, 0.8, 1.2, 1.6, 2.0, 2.5, 3.0, 4.0];
     const newPlanes = depths.map(d => {
       const plane = new THREE.Mesh(
-        new THREE.PlaneGeometry(12, 12),
+        new THREE.PlaneGeometry(15, 15),
         new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
       );
       plane.position.set(0, 0, -d);
@@ -430,19 +690,36 @@ function PlacementSystem({ onHit, active }) {
     
     planes.current = newPlanes;
     return () => newPlanes.forEach(p => scene.remove(p));
-  }, [scene]);
+  }, [scene, useWebXR]);
 
-  useFrame(() => {
+  useFrame((state, delta, frame) => {
     if (!active) return;
 
-    raycaster.current.setFromCamera(new THREE.Vector2(0, 0), camera);
-    const intersects = raycaster.current.intersectObjects(planes.current);
+    if (useWebXR && webxrManager && frame) {
+      // Use WebXR hit testing
+      const hitResult = webxrManager.getHitTestResults(frame);
+      if (hitResult) {
+        onHit({
+          point: hitResult.position,
+          normal: new THREE.Vector3(0, 1, 0), // Up normal from floor
+          distance: hitResult.position.length()
+        });
+      }
+    } else {
+      // Fallback raycasting
+      raycaster.current.setFromCamera(new THREE.Vector2(0, 0), camera);
+      const intersects = raycaster.current.intersectObjects(planes.current);
 
-    if (intersects.length > 0) {
-      const hit = intersects[0];
-      const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(camera.quaternion);
-      
-      onHit({ point: hit.point, normal, distance: hit.object.userData.depth });
+      if (intersects.length > 0) {
+        const hit = intersects[0];
+        const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(camera.quaternion);
+        
+        onHit({
+          point: hit.point,
+          normal,
+          distance: hit.object.userData.depth
+        });
+      }
     }
   });
 
@@ -451,7 +728,8 @@ function PlacementSystem({ onHit, active }) {
 
 function ARScene({
   modelUrl, anchor, detector, onPlace, isPlaced,
-  scanning, onAnalysis, gestureTransform, gestureHandler
+  scanning, onAnalysis, gestureTransform, gestureController,
+  useWebXR, webxrManager
 }) {
   const { camera, gl } = useThree();
   const [hitData, setHitData] = useState(null);
@@ -459,11 +737,11 @@ function ARScene({
   const frame = useRef(0);
 
   useFrame(() => {
-    if (scanning && detector) {
+    if (scanning && detector && !useWebXR) {
       frame.current++;
-      if (frame.current % 3 === 0) {
+      if (frame.current % 2 === 0) { // Analyze every 2 frames
         const video = document.querySelector('.ar-video');
-        detector.analyzeForWall(video).then(result => {
+        detector.analyzeFrame(video).then(result => {
           setAnalysis(result);
           onAnalysis(result);
         });
@@ -475,20 +753,23 @@ function ARScene({
     e.preventDefault();
     
     if (e.type === 'touchstart') {
-      if (!isPlaced && analysis?.isWall && analysis?.confidence > 0.75 && hitData) {
+      if (!isPlaced && analysis?.isWall && analysis?.confidence > 0.7 && hitData) {
         const rotation = new THREE.Quaternion();
-        rotation.setFromUnitVectors(new THREE.Vector3(0, 0, 1), hitData.normal);
+        rotation.setFromUnitVectors(
+          new THREE.Vector3(0, 0, 1), 
+          hitData.normal
+        );
         onPlace(hitData.point, rotation);
       } else if (isPlaced) {
         const transform = gestureTransform || anchor.getTransform(camera);
-        if (transform) gestureHandler.start(e.touches, transform);
+        if (transform) gestureController.start(e.touches, transform);
       }
     } else if (e.type === 'touchmove' && isPlaced) {
-      gestureHandler.move(e.touches, camera);
+      gestureController.move(e.touches, camera);
     } else if (e.type === 'touchend') {
-      gestureHandler.end();
+      gestureController.end();
     }
-  }, [isPlaced, analysis, hitData, onPlace, gestureTransform, anchor, camera, gestureHandler]);
+  }, [isPlaced, analysis, hitData, onPlace, gestureTransform, anchor, camera, gestureController]);
 
   useEffect(() => {
     const canvas = gl.domElement;
@@ -503,19 +784,26 @@ function ARScene({
     };
   }, [gl, handleTouch]);
 
-  const isGood = analysis?.isWall && analysis?.confidence > 0.75;
+  const isGood = useWebXR ? !!hitData : (analysis?.isWall && analysis?.confidence > 0.7);
 
   return (
     <>
-      <PlacementSystem onHit={setHitData} active={scanning} />
+      <HitTestSystem 
+        onHit={setHitData} 
+        active={scanning} 
+        useWebXR={useWebXR}
+        webxrManager={webxrManager}
+      />
+      
       <Reticle 
-        position={hitData?.point || new THREE.Vector3(0, 0, -2)}
+        position={hitData?.point || new THREE.Vector3(0, 0, -1.5)}
         isGood={isGood}
         visible={scanning && hitData}
       />
+      
       {modelUrl && isPlaced && (
         <Suspense fallback={null}>
-          <AnchoredModel 
+          <Model3D 
             url={modelUrl}
             anchor={anchor}
             isPlaced={isPlaced}
@@ -528,7 +816,9 @@ function ARScene({
 }
 
 /**
- * Main Component
+ * ============================================================================
+ * MAIN AR VIEWER COMPONENT
+ * ============================================================================
  */
 export default function CustomARViewer({ onClose }) {
   const videoRef = useRef(null);
@@ -537,6 +827,7 @@ export default function CustomARViewer({ onClose }) {
   const anchorRef = useRef(null);
   const detectorRef = useRef(null);
   const gestureRef = useRef(null);
+  const webxrRef = useRef(null);
   const sessionStart = useRef(Date.now());
   const screenshots = useRef(0);
 
@@ -546,18 +837,25 @@ export default function CustomARViewer({ onClose }) {
   const [placed, setPlaced] = useState(false);
   const [analysis, setAnalysis] = useState(null);
   const [gestureTransform, setGestureTransform] = useState(null);
+  const [useWebXR, setUseWebXR] = useState(false);
 
   const { currentModel, modelType } = useARStore();
 
   useEffect(() => {
     anchorRef.current = new WorldAnchor();
-    detectorRef.current = new PureJSWallDetector();
-    gestureRef.current = new GestureHandler((t) => {
+    detectorRef.current = new AdvancedWallDetector();
+    gestureRef.current = new GestureController((t) => {
       setGestureTransform(t);
       anchorRef.current?.update(t);
     });
-    
-    console.log('✅ Pure JS CV Detector initialized');
+    webxrRef.current = new WebXRManager();
+
+    // Check WebXR support
+    webxrRef.current.checkSupport().then(supported => {
+      setUseWebXR(supported);
+    });
+
+    console.log('✅ AR System initialized');
   }, []);
 
   const startCamera = useCallback(async () => {
@@ -572,20 +870,24 @@ export default function CustomARViewer({ onClose }) {
       });
 
       streamRef.current = stream;
-      videoRef.current.srcObject = stream;
-      await videoRef.current.play();
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
       
       setReady(true);
-      setTimeout(() => setPhase('scan'), 1000);
+      setTimeout(() => setPhase('scan'), 800);
       
       analytics.trackARSessionStarted({ url: currentModel, type: modelType });
     } catch (err) {
       setError(err.message);
+      console.error('Camera error:', err);
     }
   }, [currentModel, modelType]);
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach(t => t.stop());
+    webxrRef.current?.endSession();
   }, []);
 
   useEffect(() => {
@@ -609,12 +911,19 @@ export default function CustomARViewer({ onClose }) {
     if (!camera) return;
 
     anchorRef.current.place(camera, position, rotation);
-    setGestureTransform({ position: position.clone(), rotation: rotation.clone(), scale: 1 });
+    setGestureTransform({ 
+      position: position.clone(), 
+      rotation: rotation.clone(), 
+      scale: 1 
+    });
     setPlaced(true);
     setPhase('placed');
     
-    analytics.trackARPlacement({ confidence: analysis?.confidence });
-  }, [analysis]);
+    analytics.trackARPlacement({ 
+      confidence: analysis?.confidence,
+      method: useWebXR ? 'webxr' : 'cv'
+    });
+  }, [analysis, useWebXR]);
 
   const handleReset = useCallback(() => {
     setPlaced(false);
@@ -642,17 +951,18 @@ export default function CustomARViewer({ onClose }) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `ar-${Date.now()}.png`;
+      a.download = `ar-frame-${Date.now()}.png`;
       a.click();
       URL.revokeObjectURL(url);
       screenshots.current++;
     }, 'image/png');
   }, []);
 
-  const isGood = analysis?.isWall && analysis?.confidence > 0.75;
+  const isGood = useWebXR ? true : (analysis?.isWall && analysis?.confidence > 0.7);
 
   return (
-    <div className="ar-viewer-advanced">
+    <div className="ar-viewer-native">
+      {/* Video background (hidden for WebXR) */}
       <video 
         ref={videoRef} 
         autoPlay 
@@ -666,10 +976,12 @@ export default function CustomARViewer({ onClose }) {
           width: '100%',
           height: '100%',
           objectFit: 'cover',
-          zIndex: 1
+          zIndex: 1,
+          display: useWebXR ? 'none' : 'block'
         }}
       />
 
+      {/* Three.js AR Canvas */}
       {ready && (
         <div ref={canvasRef} className="ar-canvas-layer" style={{
           position: 'fixed',
@@ -680,17 +992,32 @@ export default function CustomARViewer({ onClose }) {
           zIndex: 2
         }}>
           <Canvas
-            gl={{ alpha: true, antialias: true, preserveDrawingBuffer: true }}
+            gl={{ 
+              alpha: true, 
+              antialias: true, 
+              preserveDrawingBuffer: true,
+              xr: { enabled: useWebXR }
+            }}
             style={{ background: 'transparent' }}
-            onCreated={({ camera }) => {
+            onCreated={({ camera, gl }) => {
               const c = canvasRef.current?.querySelector('canvas');
               if (c) c.__threeCamera = camera;
+              
+              if (useWebXR) {
+                webxrRef.current.startSession(gl);
+              }
             }}
           >
             <PerspectiveCamera makeDefault position={[0, 0, 0]} fov={70} />
-            <ambientLight intensity={0.7} />
-            <directionalLight position={[5, 5, 5]} intensity={1.5} castShadow />
-            <Environment preset="city" />
+            <ambientLight intensity={0.8} />
+            <directionalLight 
+              position={[5, 5, 5]} 
+              intensity={1.5} 
+              castShadow 
+              shadow-mapSize-width={2048}
+              shadow-mapSize-height={2048}
+            />
+            <Environment preset="apartment" />
             
             <ARScene
               modelUrl={currentModel}
@@ -701,96 +1028,423 @@ export default function CustomARViewer({ onClose }) {
               scanning={phase === 'scan'}
               onAnalysis={setAnalysis}
               gestureTransform={gestureTransform}
-              gestureHandler={gestureRef.current}
+              gestureController={gestureRef.current}
+              useWebXR={useWebXR}
+              webxrManager={webxrRef.current}
             />
           </Canvas>
         </div>
       )}
 
+      {/* Loading screen */}
       {!ready && !error && (
         <div className="ar-loading-screen">
-          <div className="loading-ring"></div>
-          <h3>Starting AR</h3>
-          <p>Initializing Pure JS CV...</p>
+          <div className="spinner">
+            <div className="spinner-ring"></div>
+            <div className="spinner-ring"></div>
+            <div className="spinner-ring"></div>
+          </div>
+          <h3>Starting AR Experience</h3>
+          <p>{useWebXR ? 'Initializing WebXR...' : 'Starting camera...'}</p>
         </div>
       )}
 
+      {/* Error screen */}
       {error && (
         <div className="ar-error-screen">
-          <AlertTriangle size={48} color="#ff3333" />
-          <h3>Camera Error</h3>
+          <AlertTriangle size={56} color="#ff3333" />
+          <h3>Camera Access Required</h3>
           <p>{error}</p>
           <button onClick={startCamera} className="btn-retry">
-            <RefreshCw size={20} /> Retry
+            <RefreshCw size={20} /> Try Again
           </button>
         </div>
       )}
 
+      {/* AR UI Overlay */}
       {ready && (
         <>
+          {/* Header */}
           <header className="ar-header">
-            <button className="ar-btn-close" onClick={onClose}>
-              <X size={22} />
+            <button className="ar-btn-close" onClick={onClose} aria-label="Close AR">
+              <X size={24} />
             </button>
             
-            <div className="ar-status-pill">
+            <div className="ar-status-badge">
               {phase === 'scan' && (
                 <>
-                  <Zap size={18} color={isGood ? "#00ff00" : "#888"} />
-                  <span>{isGood ? 'TAP TO PLACE' : analysis?.reason || 'Scanning...'}</span>
+                  <Crosshair size={18} color={isGood ? "#00ff00" : "#ff9500"} />
+                  <span>{isGood ? 'TAP TO PLACE' : analysis?.reason || 'Finding surface...'}</span>
                 </>
               )}
               {phase === 'placed' && (
                 <>
                   <CheckCircle size={18} color="#00ff00" />
-                  <span>Placed ✓</span>
+                  <span>Object Placed</span>
                 </>
               )}
             </div>
+
+            {useWebXR && (
+              <div className="ar-badge-webxr">
+                <Zap size={14} />
+                <span>WebXR</span>
+              </div>
+            )}
           </header>
 
-          {phase === 'scan' && (
-            <div className={`ar-placement-guide ${!isGood ? 'warning' : 'success'}`}>
-              {isGood ? (
-                <>
-                  <CheckCircle size={48} color="#00ff00" />
-                  <h3>Wall Found!</h3>
-                  <p>Tap green target to place</p>
-                  <small>Confidence: {(analysis.confidence * 100).toFixed(0)}%</small>
-                </>
-              ) : (
-                <>
-                  <AlertTriangle size={48} color="#ff3333" />
-                  <h3>{analysis?.surfaceType?.toUpperCase() || 'SCANNING'}</h3>
-                  <p>{analysis?.reason || 'Point at plain wall'}</p>
-                  {analysis?.metrics && (
-                    <small style={{opacity: 0.7, fontSize: '11px'}}>
-                      Bright: {analysis.metrics.brightness} | Edges: {analysis.metrics.edges} | Uni: {analysis.metrics.uniformity}
-                    </small>
-                  )}
-                </>
+          {/* Scanning guide */}
+          {phase === 'scan' && !useWebXR && (
+            <div className={`ar-guide ${isGood ? 'ready' : 'scanning'}`}>
+              <div className="ar-guide-icon">
+                {isGood ? (
+                  <CheckCircle size={64} color="#00ff00" />
+                ) : (
+                  <Move size={64} color="#ff9500" />
+                )}
+              </div>
+              <h3>{isGood ? 'Perfect! 🎯' : 'Keep moving...'}</h3>
+              <p className="ar-guide-text">
+                {isGood 
+                  ? 'Tap the green target to place your frame' 
+                  : analysis?.reason || 'Move camera slowly to find a wall'}
+              </p>
+              {analysis?.metrics && (
+                <div className="ar-metrics">
+                  <span>Brightness: {analysis.metrics.brightness}</span>
+                  <span>Edges: {analysis.metrics.edges}</span>
+                  <span>Uniformity: {analysis.metrics.uniformity}</span>
+                </div>
+              )}
+              {analysis?.stable && (
+                <div className="ar-confidence-bar">
+                  <div 
+                    className="ar-confidence-fill" 
+                    style={{width: `${analysis.confidence * 100}%`}}
+                  />
+                </div>
               )}
             </div>
           )}
 
+          {/* Controls when placed */}
           {placed && (
             <>
               <div className="ar-instructions">
-                <p>✋ Drag • 🤏 Pinch • 🔄 Rotate</p>
+                <div className="ar-instruction-item">
+                  <span>✋</span> Drag to move
+                </div>
+                <div className="ar-instruction-item">
+                  <span>🤏</span> Pinch to scale
+                </div>
+                <div className="ar-instruction-item">
+                  <span>🔄</span> Rotate with 2 fingers
+                </div>
               </div>
               
-              <div className="ar-action-panel">
-                <button className="action-btn primary" onClick={handleScreenshot}>
+              <div className="ar-toolbar">
+                <button 
+                  className="ar-tool-btn capture" 
+                  onClick={handleScreenshot}
+                  aria-label="Take screenshot"
+                >
                   <Camera size={24} />
+                  <span>Capture</span>
                 </button>
-                <button className="action-btn" onClick={handleReset}>
+                
+                <button 
+                  className="ar-tool-btn reset" 
+                  onClick={handleReset}
+                  aria-label="Reset placement"
+                >
                   <RotateCcw size={24} />
+                  <span>Reset</span>
                 </button>
               </div>
             </>
           )}
         </>
       )}
+
+      <style jsx>{`
+        .ar-viewer-native {
+          position: fixed;
+          inset: 0;
+          background: #000;
+          z-index: 9999;
+        }
+
+        .ar-video {
+          pointer-events: none;
+        }
+
+        .ar-loading-screen,
+        .ar-error-screen {
+          position: fixed;
+          inset: 0;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          background: #000;
+          color: white;
+          z-index: 10;
+        }
+
+        .spinner {
+          position: relative;
+          width: 80px;
+          height: 80px;
+          margin-bottom: 24px;
+        }
+
+        .spinner-ring {
+          position: absolute;
+          width: 100%;
+          height: 100%;
+          border: 4px solid transparent;
+          border-top-color: #00ff00;
+          border-radius: 50%;
+          animation: spin 1.5s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+        }
+
+        .spinner-ring:nth-child(2) {
+          border-top-color: #0088ff;
+          animation-delay: -0.3s;
+          width: 70%;
+          height: 70%;
+          top: 15%;
+          left: 15%;
+        }
+
+        .spinner-ring:nth-child(3) {
+          border-top-color: #ff00ff;
+          animation-delay: -0.6s;
+          width: 40%;
+          height: 40%;
+          top: 30%;
+          left: 30%;
+        }
+
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+
+        .ar-header {
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          padding: max(env(safe-area-inset-top), 16px) 16px 16px;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          z-index: 100;
+          background: linear-gradient(180deg, rgba(0,0,0,0.6) 0%, transparent 100%);
+        }
+
+        .ar-btn-close {
+          width: 44px;
+          height: 44px;
+          border-radius: 50%;
+          background: rgba(0, 0, 0, 0.7);
+          backdrop-filter: blur(10px);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          color: white;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+
+        .ar-btn-close:active {
+          transform: scale(0.95);
+          background: rgba(0, 0, 0, 0.9);
+        }
+
+        .ar-status-badge {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 10px 16px;
+          background: rgba(0, 0, 0, 0.7);
+          backdrop-filter: blur(10px);
+          border-radius: 24px;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          color: white;
+          font-size: 14px;
+          font-weight: 500;
+        }
+
+        .ar-badge-webxr {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          padding: 6px 12px;
+          background: rgba(0, 255, 0, 0.2);
+          border: 1px solid rgba(0, 255, 0, 0.4);
+          border-radius: 16px;
+          color: #00ff00;
+          font-size: 12px;
+          font-weight: 600;
+        }
+
+        .ar-guide {
+          position: fixed;
+          bottom: max(env(safe-area-inset-bottom), 40px);
+          left: 50%;
+          transform: translateX(-50%);
+          width: calc(100% - 48px);
+          max-width: 400px;
+          padding: 24px;
+          background: rgba(0, 0, 0, 0.85);
+          backdrop-filter: blur(20px);
+          border-radius: 20px;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          text-align: center;
+          z-index: 100;
+        }
+
+        .ar-guide.ready {
+          border-color: rgba(0, 255, 0, 0.3);
+          background: rgba(0, 50, 0, 0.85);
+        }
+
+        .ar-guide-icon {
+          margin-bottom: 16px;
+          animation: float 2s ease-in-out infinite;
+        }
+
+        @keyframes float {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-10px); }
+        }
+
+        .ar-guide h3 {
+          margin: 0 0 8px 0;
+          font-size: 20px;
+          font-weight: 600;
+          color: white;
+        }
+
+        .ar-guide-text {
+          margin: 0 0 12px 0;
+          font-size: 14px;
+          color: rgba(255, 255, 255, 0.8);
+          line-height: 1.5;
+        }
+
+        .ar-metrics {
+          display: flex;
+          justify-content: space-around;
+          gap: 8px;
+          margin-top: 12px;
+          font-size: 11px;
+          color: rgba(255, 255, 255, 0.6);
+        }
+
+        .ar-confidence-bar {
+          width: 100%;
+          height: 4px;
+          background: rgba(255, 255, 255, 0.1);
+          border-radius: 2px;
+          margin-top: 12px;
+          overflow: hidden;
+        }
+
+        .ar-confidence-fill {
+          height: 100%;
+          background: linear-gradient(90deg, #00ff00, #00ff00);
+          transition: width 0.3s;
+        }
+
+        .ar-instructions {
+          position: fixed;
+          top: max(env(safe-area-inset-top), 80px);
+          left: 50%;
+          transform: translateX(-50%);
+          display: flex;
+          gap: 16px;
+          padding: 12px 20px;
+          background: rgba(0, 0, 0, 0.7);
+          backdrop-filter: blur(10px);
+          border-radius: 20px;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          z-index: 100;
+        }
+
+        .ar-instruction-item {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 13px;
+          color: white;
+          white-space: nowrap;
+        }
+
+        .ar-instruction-item span {
+          font-size: 16px;
+        }
+
+        .ar-toolbar {
+          position: fixed;
+          bottom: max(env(safe-area-inset-bottom), 40px);
+          left: 50%;
+          transform: translateX(-50%);
+          display: flex;
+          gap: 16px;
+          z-index: 100;
+        }
+
+        .ar-tool-btn {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 6px;
+          padding: 16px 24px;
+          background: rgba(0, 0, 0, 0.8);
+          backdrop-filter: blur(10px);
+          border: 1px solid rgba(255, 255, 255, 0.2);
+          border-radius: 16px;
+          color: white;
+          font-size: 12px;
+          font-weight: 500;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+
+        .ar-tool-btn.capture {
+          background: rgba(0, 255, 0, 0.2);
+          border-color: rgba(0, 255, 0, 0.4);
+          color: #00ff00;
+        }
+
+        .ar-tool-btn:active {
+          transform: scale(0.95);
+        }
+
+        .btn-retry {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 14px 28px;
+          margin-top: 24px;
+          background: #00ff00;
+          color: #000;
+          border: none;
+          border-radius: 12px;
+          font-size: 16px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+
+        .btn-retry:active {
+          transform: scale(0.95);
+        }
+      `}</style>
     </div>
   );
 }
