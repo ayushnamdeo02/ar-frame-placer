@@ -9,9 +9,6 @@ import * as THREE from 'three';
 import { 
   X, 
   Camera, 
-  RotateCw, 
-  ZoomIn, 
-  ZoomOut, 
   Maximize2,
   Minimize2,
   Grid,
@@ -22,52 +19,6 @@ import {
 
 import useARStore from '../store/useARStore';
 import analytics from '../services/analytics';
-import { TRANSFORM_CONFIG } from '../utils/constants';
-
-/**
- * Wall Plane Component - Invisible planes for detecting walls
- */
-function WallPlanes({ onWallDetected }) {
-  const wallsRef = useRef([]);
-  const { camera } = useThree();
-  
-  useEffect(() => {
-    // Create invisible wall planes at different positions
-    const walls = [];
-    
-    // Front wall
-    walls.push(new THREE.Mesh(
-      new THREE.PlaneGeometry(10, 10),
-      new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
-    ));
-    walls[0].position.set(0, 0, -3);
-    
-    // Left wall
-    walls.push(new THREE.Mesh(
-      new THREE.PlaneGeometry(10, 10),
-      new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
-    ));
-    walls[1].position.set(-3, 0, 0);
-    walls[1].rotation.y = Math.PI / 2;
-    
-    // Right wall
-    walls.push(new THREE.Mesh(
-      new THREE.PlaneGeometry(10, 10),
-      new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
-    ));
-    walls[2].position.set(3, 0, 0);
-    walls[2].rotation.y = -Math.PI / 2;
-    
-    wallsRef.current = walls;
-    walls.forEach(wall => camera.parent.add(wall));
-    
-    return () => {
-      walls.forEach(wall => camera.parent.remove(wall));
-    };
-  }, [camera]);
-  
-  return null;
-}
 
 /**
  * Placement Reticle Component - Shows where frame will be placed
@@ -112,7 +63,6 @@ function PlacementReticle({ position, visible }) {
 function Model3D({ url, worldPosition, worldRotation, worldScale, isPlaced }) {
   const modelRef = useRef();
   const gltf = useGLTF(url);
-  const { camera } = useThree();
 
   useFrame(() => {
     if (modelRef.current && isPlaced) {
@@ -157,7 +107,6 @@ function Model3D({ url, worldPosition, worldRotation, worldScale, isPlaced }) {
 function ARScene({ currentModel, onPlacement, isPlaced, worldTransform, onTransformChange }) {
   const { camera, scene, gl } = useThree();
   const raycaster = useRef(new THREE.Raycaster());
-  const mouse = useRef(new THREE.Vector2());
   const [reticlePosition, setReticlePosition] = useState(new THREE.Vector3(0, 0, -2));
   const [showReticle, setShowReticle] = useState(!isPlaced);
   const wallPlanesRef = useRef([]);
@@ -231,8 +180,6 @@ function ARScene({ currentModel, onPlacement, isPlaced, worldTransform, onTransf
   const handlePointerDown = useCallback((event) => {
     if (isPlaced) {
       // Handle model manipulation
-      const rect = gl.domElement.getBoundingClientRect();
-      
       if (event.touches && event.touches.length === 1) {
         // Single touch - start drag
         touchStart.current = {
@@ -254,7 +201,7 @@ function ARScene({ currentModel, onPlacement, isPlaced, worldTransform, onTransf
       onPlacement(reticlePosition);
       setShowReticle(false);
     }
-  }, [isPlaced, reticlePosition, onPlacement, gl]);
+  }, [isPlaced, reticlePosition, onPlacement]);
 
   const handlePointerMove = useCallback((event) => {
     if (!isPlaced || !isDragging.current) return;
@@ -375,14 +322,11 @@ export default function CustomARViewer({ onClose }) {
   const {
     currentModel,
     modelType,
-    showControls,
     showGrid,
-    toggleControls,
     toggleGrid,
-    resetTransform,
   } = useARStore();
 
-  // Camera initialization (same as before)
+  // Camera initialization
   const initCamera = useCallback(async () => {
     if (streamRef.current || initAttempts.current > 3) return;
 
