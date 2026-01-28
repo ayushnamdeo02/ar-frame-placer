@@ -5,6 +5,7 @@
   "private": true,
   "dependencies": {
     "@google/model-viewer": "^3.4.0",
+    "@mediapipe/selfie_segmentation": "^0.1.1675465747",
     "@react-three/drei": "^9.122.0",
     "@react-three/fiber": "^8.18.0",
     "@react-three/xr": "^5.7.1",
