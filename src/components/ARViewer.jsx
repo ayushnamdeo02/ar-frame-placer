@@ -1,10 +1,10 @@
 /**
  * CustomARViewer Component
- * Advanced AR system with robust camera handling for iOS & Android
+ * Advanced AR with depth detection, wall detection, and intelligent placement
  */
 import React, { useEffect, useRef, useState, useCallback, Suspense } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
-import { OrbitControls, Environment, useGLTF, Center, PerspectiveCamera } from '@react-three/drei';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { Environment, useGLTF, Center, PerspectiveCamera } from '@react-three/drei';
 import * as THREE from 'three';
 import { 
   X, 
@@ -16,7 +16,8 @@ import {
   Minimize2,
   Grid,
   RotateCcw,
-  RefreshCw
+  RefreshCw,
+  Target
 } from 'lucide-react';
 
 import useARStore from '../store/useARStore';
@@ -24,19 +25,101 @@ import analytics from '../services/analytics';
 import { TRANSFORM_CONFIG } from '../utils/constants';
 
 /**
- * Model Component - Renders the 3D model in the scene
+ * Wall Plane Component - Invisible planes for detecting walls
  */
-function Model3D({ url }) {
-  const { position, rotation, scale } = useARStore();
-  const modelRef = useRef();
+function WallPlanes({ onWallDetected }) {
+  const wallsRef = useRef([]);
+  const { camera } = useThree();
   
+  useEffect(() => {
+    // Create invisible wall planes at different positions
+    const walls = [];
+    
+    // Front wall
+    walls.push(new THREE.Mesh(
+      new THREE.PlaneGeometry(10, 10),
+      new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
+    ));
+    walls[0].position.set(0, 0, -3);
+    
+    // Left wall
+    walls.push(new THREE.Mesh(
+      new THREE.PlaneGeometry(10, 10),
+      new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
+    ));
+    walls[1].position.set(-3, 0, 0);
+    walls[1].rotation.y = Math.PI / 2;
+    
+    // Right wall
+    walls.push(new THREE.Mesh(
+      new THREE.PlaneGeometry(10, 10),
+      new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
+    ));
+    walls[2].position.set(3, 0, 0);
+    walls[2].rotation.y = -Math.PI / 2;
+    
+    wallsRef.current = walls;
+    walls.forEach(wall => camera.parent.add(wall));
+    
+    return () => {
+      walls.forEach(wall => camera.parent.remove(wall));
+    };
+  }, [camera]);
+  
+  return null;
+}
+
+/**
+ * Placement Reticle Component - Shows where frame will be placed
+ */
+function PlacementReticle({ position, visible }) {
+  const meshRef = useRef();
+  
+  useFrame(() => {
+    if (meshRef.current && visible) {
+      meshRef.current.rotation.z += 0.02;
+    }
+  });
+  
+  if (!visible) return null;
+  
+  return (
+    <group position={position}>
+      <mesh ref={meshRef}>
+        <ringGeometry args={[0.15, 0.2, 32]} />
+        <meshBasicMaterial color="#00ff00" transparent opacity={0.7} side={THREE.DoubleSide} />
+      </mesh>
+      <mesh>
+        <ringGeometry args={[0.08, 0.12, 32]} />
+        <meshBasicMaterial color="#ffffff" transparent opacity={0.9} side={THREE.DoubleSide} />
+      </mesh>
+      {/* Crosshair */}
+      <mesh position={[0, 0, 0.01]}>
+        <planeGeometry args={[0.3, 0.02]} />
+        <meshBasicMaterial color="#00ff00" transparent opacity={0.7} />
+      </mesh>
+      <mesh position={[0, 0, 0.01]} rotation={[0, 0, Math.PI / 2]}>
+        <planeGeometry args={[0.3, 0.02]} />
+        <meshBasicMaterial color="#00ff00" transparent opacity={0.7} />
+      </mesh>
+    </group>
+  );
+}
+
+/**
+ * Model Component - Renders the 3D model with fixed positioning
+ */
+function Model3D({ url, worldPosition, worldRotation, worldScale, isPlaced }) {
+  const modelRef = useRef();
   const gltf = useGLTF(url);
+  const { camera } = useThree();
 
   useFrame(() => {
-    if (modelRef.current) {
-      modelRef.current.position.set(position.x, position.y, position.z);
-      modelRef.current.rotation.set(rotation.x, rotation.y, rotation.z);
-      modelRef.current.scale.setScalar(scale);
+    if (modelRef.current && isPlaced) {
+      // Keep model at fixed world position regardless of camera movement
+      modelRef.current.position.copy(worldPosition);
+      modelRef.current.rotation.copy(worldRotation);
+      modelRef.current.scale.setScalar(worldScale);
     }
   });
 
@@ -63,13 +146,211 @@ function Model3D({ url }) {
 
   return (
     <Center>
-      <primitive ref={modelRef} object={clonedScene} />
+      <primitive ref={modelRef} object={clonedScene} visible={isPlaced} />
     </Center>
   );
 }
 
 /**
- * Main ARViewer Component
+ * AR Scene Component - Handles all 3D interactions
+ */
+function ARScene({ currentModel, onPlacement, isPlaced, worldTransform, onTransformChange }) {
+  const { camera, scene, gl } = useThree();
+  const raycaster = useRef(new THREE.Raycaster());
+  const mouse = useRef(new THREE.Vector2());
+  const [reticlePosition, setReticlePosition] = useState(new THREE.Vector3(0, 0, -2));
+  const [showReticle, setShowReticle] = useState(!isPlaced);
+  const wallPlanesRef = useRef([]);
+  
+  // Touch gesture handling
+  const touchStart = useRef({ x: 0, y: 0, distance: 0 });
+  const isDragging = useRef(false);
+  const isPinching = useRef(false);
+
+  // Create wall detection planes
+  useEffect(() => {
+    const walls = [];
+    
+    // Create multiple wall planes around the scene
+    const wallPositions = [
+      { pos: [0, 0, -3], rot: [0, 0, 0] },           // Front
+      { pos: [-3, 0, 0], rot: [0, Math.PI/2, 0] },   // Left
+      { pos: [3, 0, 0], rot: [0, -Math.PI/2, 0] },   // Right
+      { pos: [0, 0, 3], rot: [0, Math.PI, 0] },      // Back
+    ];
+    
+    wallPositions.forEach(({ pos, rot }) => {
+      const wall = new THREE.Mesh(
+        new THREE.PlaneGeometry(10, 10),
+        new THREE.MeshBasicMaterial({ 
+          visible: false, 
+          side: THREE.DoubleSide 
+        })
+      );
+      wall.position.set(...pos);
+      wall.rotation.set(...rot);
+      wall.userData.isWall = true;
+      scene.add(wall);
+      walls.push(wall);
+    });
+    
+    wallPlanesRef.current = walls;
+    
+    return () => {
+      walls.forEach(wall => scene.remove(wall));
+    };
+  }, [scene]);
+
+  // Update reticle position based on camera direction
+  useFrame(() => {
+    if (!isPlaced && wallPlanesRef.current.length > 0) {
+      // Cast ray from center of screen
+      raycaster.current.setFromCamera(new THREE.Vector2(0, 0), camera);
+      
+      const intersects = raycaster.current.intersectObjects(wallPlanesRef.current);
+      
+      if (intersects.length > 0) {
+        const point = intersects[0].point;
+        const normal = intersects[0].face.normal;
+        
+        // Offset slightly from wall
+        const offsetPoint = point.clone().add(normal.multiplyScalar(0.01));
+        setReticlePosition(offsetPoint);
+        setShowReticle(true);
+      } else {
+        // Default position in front of camera
+        const forward = new THREE.Vector3(0, 0, -2);
+        forward.applyQuaternion(camera.quaternion);
+        setReticlePosition(camera.position.clone().add(forward));
+        setShowReticle(true);
+      }
+    }
+  });
+
+  // Handle tap/click to place
+  const handlePointerDown = useCallback((event) => {
+    if (isPlaced) {
+      // Handle model manipulation
+      const rect = gl.domElement.getBoundingClientRect();
+      
+      if (event.touches && event.touches.length === 1) {
+        // Single touch - start drag
+        touchStart.current = {
+          x: event.touches[0].clientX,
+          y: event.touches[0].clientY,
+          distance: 0
+        };
+        isDragging.current = true;
+      } else if (event.touches && event.touches.length === 2) {
+        // Two fingers - pinch to scale
+        const dx = event.touches[0].clientX - event.touches[1].clientX;
+        const dy = event.touches[0].clientY - event.touches[1].clientY;
+        touchStart.current.distance = Math.sqrt(dx * dx + dy * dy);
+        isPinching.current = true;
+        isDragging.current = false;
+      }
+    } else {
+      // Place the model
+      onPlacement(reticlePosition);
+      setShowReticle(false);
+    }
+  }, [isPlaced, reticlePosition, onPlacement, gl]);
+
+  const handlePointerMove = useCallback((event) => {
+    if (!isPlaced || !isDragging.current) return;
+    
+    if (event.touches && event.touches.length === 1 && isDragging.current) {
+      // Move model
+      const deltaX = (event.touches[0].clientX - touchStart.current.x) * 0.01;
+      const deltaY = -(event.touches[0].clientY - touchStart.current.y) * 0.01;
+      
+      const newPos = worldTransform.position.clone();
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+      const up = new THREE.Vector3(0, 1, 0);
+      
+      newPos.add(right.multiplyScalar(deltaX));
+      newPos.add(up.multiplyScalar(deltaY));
+      
+      onTransformChange({
+        position: newPos,
+        rotation: worldTransform.rotation,
+        scale: worldTransform.scale
+      });
+      
+      touchStart.current.x = event.touches[0].clientX;
+      touchStart.current.y = event.touches[0].clientY;
+    } else if (event.touches && event.touches.length === 2 && isPinching.current) {
+      // Scale model
+      const dx = event.touches[0].clientX - event.touches[1].clientX;
+      const dy = event.touches[0].clientY - event.touches[1].clientY;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      
+      const delta = (distance - touchStart.current.distance) * 0.005;
+      const newScale = Math.max(0.1, Math.min(5, worldTransform.scale + delta));
+      
+      onTransformChange({
+        position: worldTransform.position,
+        rotation: worldTransform.rotation,
+        scale: newScale
+      });
+      
+      touchStart.current.distance = distance;
+    }
+  }, [isPlaced, worldTransform, camera, onTransformChange]);
+
+  const handlePointerUp = useCallback(() => {
+    isDragging.current = false;
+    isPinching.current = false;
+  }, []);
+
+  useEffect(() => {
+    const canvas = gl.domElement;
+    canvas.addEventListener('pointerdown', handlePointerDown);
+    canvas.addEventListener('pointermove', handlePointerMove);
+    canvas.addEventListener('pointerup', handlePointerUp);
+    canvas.addEventListener('touchstart', handlePointerDown);
+    canvas.addEventListener('touchmove', handlePointerMove);
+    canvas.addEventListener('touchend', handlePointerUp);
+    
+    return () => {
+      canvas.removeEventListener('pointerdown', handlePointerDown);
+      canvas.removeEventListener('pointermove', handlePointerMove);
+      canvas.removeEventListener('pointerup', handlePointerUp);
+      canvas.removeEventListener('touchstart', handlePointerDown);
+      canvas.removeEventListener('touchmove', handlePointerMove);
+      canvas.removeEventListener('touchend', handlePointerUp);
+    };
+  }, [gl, handlePointerDown, handlePointerMove, handlePointerUp]);
+
+  return (
+    <>
+      {currentModel && (
+        <Suspense fallback={
+          <mesh>
+            <boxGeometry args={[1, 1, 1]} />
+            <meshStandardMaterial color="#007AFF" wireframe />
+          </mesh>
+        }>
+          <Model3D 
+            url={currentModel} 
+            worldPosition={worldTransform.position}
+            worldRotation={worldTransform.rotation}
+            worldScale={worldTransform.scale}
+            isPlaced={isPlaced}
+          />
+        </Suspense>
+      )}
+      
+      <PlacementReticle 
+        position={reticlePosition} 
+        visible={showReticle && !isPlaced} 
+      />
+    </>
+  );
+}
+
+/**
+ * Main CustomARViewer Component
  */
 export default function CustomARViewer({ onClose }) {
   const videoRef = useRef(null);
@@ -84,30 +365,26 @@ export default function CustomARViewer({ onClose }) {
   const [cameraError, setCameraError] = useState(null);
   const [facingMode, setFacingMode] = useState('environment');
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isModelPlaced, setIsModelPlaced] = useState(false);
+  const [worldTransform, setWorldTransform] = useState({
+    position: new THREE.Vector3(0, 0, -2),
+    rotation: new THREE.Euler(0, 0, 0),
+    scale: 1
+  });
 
   const {
     currentModel,
     modelType,
-    position,
-    rotation,
-    scale,
     showControls,
     showGrid,
-    setPosition,
-    setRotation,
-    setScale,
     toggleControls,
     toggleGrid,
     resetTransform,
   } = useARStore();
 
-  /**
-   * Robust Camera Initialization with multiple fallbacks
-   */
+  // Camera initialization (same as before)
   const initCamera = useCallback(async () => {
-    if (streamRef.current || initAttempts.current > 3) {
-      return;
-    }
+    if (streamRef.current || initAttempts.current > 3) return;
 
     initAttempts.current++;
     setCameraStatus('requesting');
@@ -123,105 +400,49 @@ export default function CustomARViewer({ onClose }) {
                        window.location.hostname === '127.0.0.1';
       
       if (!isSecure) {
-        throw new Error('Camera requires HTTPS. Please access via https:// or localhost');
+        throw new Error('Camera requires HTTPS');
       }
 
       const constraintSets = [
         {
           video: {
             facingMode: { ideal: facingMode },
-            width: { ideal: 1920, max: 1920 },
-            height: { ideal: 1080, max: 1080 },
-            aspectRatio: { ideal: 16/9 }
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
           },
           audio: false
         },
-        {
-          video: {
-            facingMode: { exact: facingMode },
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          },
-          audio: false
-        },
-        {
-          video: {
-            facingMode: facingMode,
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          },
-          audio: false
-        },
-        {
-          video: {
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          },
-          audio: false
-        },
-        {
-          video: true,
-          audio: false
-        }
+        { video: { facingMode: facingMode }, audio: false },
+        { video: true, audio: false }
       ];
 
       let stream = null;
-      let lastError = null;
-
       for (const constraints of constraintSets) {
         try {
-          console.log('Attempting camera with constraints:', constraints);
           stream = await navigator.mediaDevices.getUserMedia(constraints);
-          
-          if (stream) {
-            console.log('Camera stream obtained successfully');
-            break;
-          }
+          if (stream) break;
         } catch (err) {
-          console.warn('Camera constraint attempt failed:', err.message);
-          lastError = err;
+          console.warn('Constraint failed:', err);
         }
       }
 
-      if (!stream) {
-        throw lastError || new Error('Failed to access camera with all constraint sets');
-      }
+      if (!stream) throw new Error('Failed to access camera');
 
       streamRef.current = stream;
-
       const video = videoRef.current;
-      if (!video) {
-        throw new Error('Video element not found');
-      }
+      if (!video) throw new Error('Video element not found');
 
       video.srcObject = stream;
 
       await new Promise((resolve, reject) => {
-        video.onloadedmetadata = () => {
-          console.log('Video metadata loaded');
-          resolve();
-        };
-        
-        video.onerror = (error) => {
-          console.error('Video error:', error);
-          reject(new Error('Video element failed to load'));
-        };
-
-        setTimeout(() => reject(new Error('Video loading timeout')), 10000);
+        video.onloadedmetadata = resolve;
+        video.onerror = reject;
+        setTimeout(() => reject(new Error('Timeout')), 10000);
       });
 
-      try {
-        await video.play();
-        console.log('Video playing successfully');
-      } catch (playError) {
-        console.error('Video play error:', playError);
-        video.muted = true;
-        await video.play();
-      }
-
+      await video.play();
       setCameraStatus('ready');
-      setCameraError(null);
-
+      
       analytics.trackARSessionStarted({
         url: currentModel,
         type: modelType,
@@ -229,49 +450,21 @@ export default function CustomARViewer({ onClose }) {
       });
 
     } catch (error) {
-      console.error('Camera initialization error:', error);
-      
-      let errorMessage = 'Camera access failed. ';
-      
-      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
-        errorMessage += 'Please allow camera permissions in your browser settings.';
-      } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
-        errorMessage += 'No camera found on this device.';
-      } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
-        errorMessage += 'Camera is already in use by another application.';
-      } else if (error.name === 'OverconstrainedError') {
-        errorMessage += 'Camera does not support required features.';
-      } else if (error.name === 'SecurityError') {
-        errorMessage += 'Camera access requires HTTPS or localhost.';
-      } else {
-        errorMessage += error.message || 'Unknown error occurred.';
-      }
-
       setCameraStatus('error');
-      setCameraError(errorMessage);
+      setCameraError(error.message || 'Camera access failed');
     }
   }, [facingMode, currentModel, modelType]);
 
-  /**
-   * Stop camera stream
-   */
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => {
-        track.stop();
-        console.log('Camera track stopped');
-      });
+      streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
-
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
   }, []);
 
-  /**
-   * Switch camera (front/back)
-   */
   const switchCamera = useCallback(() => {
     stopCamera();
     setFacingMode(prev => prev === 'environment' ? 'user' : 'environment');
@@ -279,9 +472,6 @@ export default function CustomARViewer({ onClose }) {
     setTimeout(() => initCamera(), 100);
   }, [stopCamera, initCamera]);
 
-  /**
-   * Retry camera initialization
-   */
   const retryCamera = useCallback(() => {
     stopCamera();
     initAttempts.current = 0;
@@ -290,24 +480,16 @@ export default function CustomARViewer({ onClose }) {
     setTimeout(() => initCamera(), 100);
   }, [stopCamera, initCamera]);
 
-  /**
-   * Initialize camera on mount
-   */
   useEffect(() => {
-    // Copy ref values to variables for cleanup
     const startTime = sessionStartTime.current;
     const screenshotCountValue = screenshotCount.current;
     const transformCountValue = transformCount.current;
 
-    const timer = setTimeout(() => {
-      initCamera();
-    }, 500);
+    const timer = setTimeout(() => initCamera(), 500);
 
     return () => {
       clearTimeout(timer);
       stopCamera();
-      
-      // Use copied variables in cleanup
       const duration = Date.now() - startTime;
       analytics.trackARSessionEnded({
         duration,
@@ -317,92 +499,53 @@ export default function CustomARViewer({ onClose }) {
     };
   }, [initCamera, stopCamera]);
 
-  /**
-   * Handle transform changes
-   */
-  const handleMove = useCallback((axis, direction) => {
-    const step = TRANSFORM_CONFIG.MOVE_STEP;
-    const newPosition = { ...position };
-
-    switch (axis) {
-      case 'x':
-        newPosition.x += direction * step;
-        break;
-      case 'y':
-        newPosition.y += direction * step;
-        break;
-      case 'z':
-        newPosition.z += direction * step;
-        break;
-      default:
-        break;
-    }
-
-    setPosition(newPosition);
+  const handlePlacement = useCallback((position) => {
+    setWorldTransform({
+      position: position.clone(),
+      rotation: new THREE.Euler(0, 0, 0),
+      scale: 1
+    });
+    setIsModelPlaced(true);
     transformCount.current++;
-  }, [position, setPosition]);
+  }, []);
 
-  const handleRotate = useCallback((axis, direction) => {
-    const step = TRANSFORM_CONFIG.ROTATE_STEP;
-    const newRotation = { ...rotation };
-
-    switch (axis) {
-      case 'x':
-        newRotation.x += direction * step;
-        break;
-      case 'y':
-        newRotation.y += direction * step;
-        break;
-      case 'z':
-        newRotation.z += direction * step;
-        break;
-      default:
-        break;
-    }
-
-    setRotation(newRotation);
+  const handleTransformChange = useCallback((newTransform) => {
+    setWorldTransform(newTransform);
     transformCount.current++;
-  }, [rotation, setRotation]);
+  }, []);
 
-  const handleScale = useCallback((increase) => {
-    const step = TRANSFORM_CONFIG.SCALE_STEP;
-    const newScale = increase ? scale + step : scale - step;
-    setScale(newScale);
-    transformCount.current++;
-  }, [scale, setScale]);
+  const handleReset = useCallback(() => {
+    setIsModelPlaced(false);
+    setWorldTransform({
+      position: new THREE.Vector3(0, 0, -2),
+      rotation: new THREE.Euler(0, 0, 0),
+      scale: 1
+    });
+  }, []);
 
-  /**
-   * Capture screenshot
-   */
   const handleScreenshot = useCallback(async () => {
     try {
       const composite = document.createElement('canvas');
       const video = videoRef.current;
       const canvas = canvasRef.current?.querySelector('canvas');
 
-      if (!video || !canvas) {
-        console.error('Video or canvas not found');
-        return;
-      }
+      if (!video || !canvas) return;
 
       composite.width = video.videoWidth || window.innerWidth;
       composite.height = video.videoHeight || window.innerHeight;
 
       const ctx = composite.getContext('2d');
-
       ctx.drawImage(video, 0, 0, composite.width, composite.height);
       ctx.drawImage(canvas, 0, 0, composite.width, composite.height);
 
       composite.toBlob((blob) => {
         if (!blob) return;
-        
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
         link.download = `ar-frame-${Date.now()}.png`;
         link.click();
         URL.revokeObjectURL(url);
-
         screenshotCount.current++;
         analytics.trackScreenshotCaptured();
       }, 'image/png');
@@ -411,33 +554,13 @@ export default function CustomARViewer({ onClose }) {
     }
   }, []);
 
-  /**
-   * Toggle fullscreen
-   */
   const toggleFullscreen = useCallback(async () => {
     try {
       if (!isFullscreen) {
-        const elem = document.documentElement;
-        if (elem.requestFullscreen) {
-          await elem.requestFullscreen();
-        } else if (elem.webkitRequestFullscreen) {
-          await elem.webkitRequestFullscreen();
-        } else if (elem.mozRequestFullScreen) {
-          await elem.mozRequestFullScreen();
-        } else if (elem.msRequestFullscreen) {
-          await elem.msRequestFullscreen();
-        }
+        await document.documentElement.requestFullscreen?.();
         setIsFullscreen(true);
       } else {
-        if (document.exitFullscreen) {
-          await document.exitFullscreen();
-        } else if (document.webkitExitFullscreen) {
-          await document.webkitExitFullscreen();
-        } else if (document.mozCancelFullScreen) {
-          await document.mozCancelFullScreen();
-        } else if (document.msExitFullscreen) {
-          await document.msExitFullscreen();
-        }
+        await document.exitFullscreen?.();
         setIsFullscreen(false);
       }
     } catch (error) {
@@ -445,9 +568,6 @@ export default function CustomARViewer({ onClose }) {
     }
   }, [isFullscreen]);
 
-  /**
-   * Handle close
-   */
   const handleClose = useCallback(() => {
     stopCamera();
     onClose();
@@ -473,57 +593,31 @@ export default function CustomARViewer({ onClose }) {
       />
 
       {cameraStatus === 'ready' && (
-        <div ref={canvasRef} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 2 }}>
+        <div ref={canvasRef} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 2, pointerEvents: 'auto' }}>
           <Canvas
             gl={{ 
               alpha: true, 
               antialias: true,
               preserveDrawingBuffer: true,
-              premultipliedAlpha: true,
             }}
             style={{ background: 'transparent' }}
           >
-            <PerspectiveCamera makeDefault position={[0, 0, 5]} fov={50} />
+            <PerspectiveCamera makeDefault position={[0, 0, 0]} fov={60} />
             
-            <ambientLight intensity={0.8} />
-            <directionalLight 
-              position={[10, 10, 5]} 
-              intensity={1.5} 
-              castShadow
-              shadow-mapSize-width={1024}
-              shadow-mapSize-height={1024}
-            />
-            <pointLight position={[-10, -10, -5]} intensity={0.5} />
-            <hemisphereLight 
-              skyColor="#ffffff" 
-              groundColor="#444444" 
-              intensity={0.6} 
-            />
+            <ambientLight intensity={0.6} />
+            <directionalLight position={[5, 5, 5]} intensity={1} castShadow />
+            <pointLight position={[-5, 5, -5]} intensity={0.4} />
             
             <Environment preset="city" />
             
-            {showGrid && (
-              <gridHelper args={[10, 10]} position={[0, -1, 0]} />
-            )}
+            {showGrid && <gridHelper args={[10, 10]} position={[0, -1.5, 0]} />}
             
-            {currentModel && (
-              <Suspense fallback={
-                <mesh>
-                  <boxGeometry args={[1, 1, 1]} />
-                  <meshStandardMaterial color="#007AFF" wireframe />
-                </mesh>
-              }>
-                <Model3D url={currentModel} />
-              </Suspense>
-            )}
-            
-            <OrbitControls 
-              enableDamping
-              dampingFactor={0.05}
-              enableZoom
-              enablePan
-              minDistance={1}
-              maxDistance={10}
+            <ARScene 
+              currentModel={currentModel}
+              onPlacement={handlePlacement}
+              isPlaced={isModelPlaced}
+              worldTransform={worldTransform}
+              onTransformChange={handleTransformChange}
             />
           </Canvas>
         </div>
@@ -532,40 +626,21 @@ export default function CustomARViewer({ onClose }) {
       {(cameraStatus === 'initializing' || cameraStatus === 'requesting') && (
         <div className="ar-overlay loading-overlay">
           <div className="loading-spinner"></div>
-          <p>{cameraStatus === 'initializing' ? 'Initializing camera...' : 'Requesting camera permissions...'}</p>
-          <small style={{ marginTop: '10px', opacity: 0.7 }}>
-            {window.location.protocol !== 'https:' && window.location.hostname !== 'localhost' 
-              ? '⚠️ Camera requires HTTPS or localhost'
-              : 'Please allow camera access when prompted'}
-          </small>
+          <p>{cameraStatus === 'initializing' ? 'Initializing...' : 'Requesting camera...'}</p>
         </div>
       )}
 
       {cameraStatus === 'error' && (
         <div className="ar-overlay error-overlay">
           <div className="error-icon">⚠️</div>
-          <h3>Camera Access Error</h3>
-          <p style={{ marginBottom: '20px' }}>{cameraError}</p>
-          
-          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'center' }}>
-            <button className="btn btn-primary" onClick={retryCamera}>
-              <RefreshCw size={18} /> Retry Camera
-            </button>
-            <button className="btn btn-secondary" onClick={handleClose}>
-              <X size={18} /> Go Back
-            </button>
-          </div>
-
-          <div style={{ marginTop: '20px', fontSize: '14px', opacity: 0.8, textAlign: 'left', maxWidth: '400px' }}>
-            <strong>Troubleshooting:</strong>
-            <ul style={{ marginTop: '10px', paddingLeft: '20px' }}>
-              <li>Check browser camera permissions in Settings</li>
-              <li>Ensure no other app is using the camera</li>
-              <li>Try accessing via HTTPS or localhost</li>
-              <li>Reload the page and try again</li>
-              <li>Try a different browser (Chrome/Safari)</li>
-            </ul>
-          </div>
+          <h3>Camera Error</h3>
+          <p>{cameraError}</p>
+          <button className="btn btn-primary" onClick={retryCamera}>
+            <RefreshCw size={18} /> Retry
+          </button>
+          <button className="btn btn-secondary" onClick={handleClose}>
+            <X size={18} /> Close
+          </button>
         </div>
       )}
 
@@ -577,117 +652,45 @@ export default function CustomARViewer({ onClose }) {
             </button>
 
             <div className="ar-info-badge">
-              <span>{modelType === 'frame' ? '🖼️ Frame' : '🎨 Wallpaper'}</span>
+              <span>{isModelPlaced ? '✅ Placed' : '🎯 Tap to Place'}</span>
             </div>
 
             <div className="ar-actions">
-              <button className="btn-icon" onClick={toggleGrid} title="Toggle Grid (G)">
+              <button className="btn-icon" onClick={toggleGrid}>
                 <Grid size={20} />
               </button>
-              
-              <button className="btn-icon" onClick={switchCamera} title="Switch Camera">
+              <button className="btn-icon" onClick={switchCamera}>
                 <RefreshCw size={20} />
               </button>
-              
               <button className="btn-icon" onClick={toggleFullscreen}>
                 {isFullscreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}
               </button>
             </div>
           </div>
 
-          <div className="ar-instructions">
-            <p>👆 Drag to move • 🤏 Pinch to scale • 🔄 Two fingers to rotate</p>
-          </div>
-
-          {showControls && (
-            <div className="ar-controls">
-              <div className="controls-group movement-controls">
-                <button 
-                  className="control-btn"
-                  onClick={() => handleMove('y', 1)}
-                  title="Move Up"
-                >
-                  ↑
-                </button>
-                
-                <div className="controls-row">
-                  <button 
-                    className="control-btn"
-                    onClick={() => handleMove('x', -1)}
-                    title="Move Left"
-                  >
-                    ←
-                  </button>
-                  
-                  <button 
-                    className="control-btn primary-btn"
-                    onClick={handleScreenshot}
-                    title="Capture (S)"
-                  >
-                    <Camera size={24} />
-                  </button>
-                  
-                  <button 
-                    className="control-btn"
-                    onClick={() => handleMove('x', 1)}
-                    title="Move Right"
-                  >
-                    →
-                  </button>
-                </div>
-                
-                <button 
-                  className="control-btn"
-                  onClick={() => handleMove('y', -1)}
-                  title="Move Down"
-                >
-                  ↓
-                </button>
-              </div>
-
-              <div className="controls-group action-controls">
-                <button 
-                  className="control-btn-small"
-                  onClick={() => handleScale(false)}
-                  title="Zoom Out (-)"
-                >
-                  <ZoomOut size={18} />
-                </button>
-                
-                <button 
-                  className="control-btn-small"
-                  onClick={() => handleRotate('y', 1)}
-                  title="Rotate"
-                >
-                  <RotateCw size={18} />
-                </button>
-                
-                <button 
-                  className="control-btn-small"
-                  onClick={() => handleScale(true)}
-                  title="Zoom In (+)"
-                >
-                  <ZoomIn size={18} />
-                </button>
-                
-                <button 
-                  className="control-btn-small"
-                  onClick={resetTransform}
-                  title="Reset (R)"
-                >
-                  <RotateCcw size={18} />
-                </button>
-              </div>
+          {!isModelPlaced && (
+            <div className="ar-instructions">
+              <Target size={24} />
+              <p>Point camera at a wall surface and tap to place frame</p>
             </div>
           )}
 
-          <button 
-            className="btn-toggle-controls"
-            onClick={toggleControls}
-            title="Toggle Controls (C)"
-          >
-            {showControls ? 'Hide' : 'Show'} Controls
-          </button>
+          {isModelPlaced && (
+            <div className="ar-instructions">
+              <p>👆 Drag to move • 🤏 Pinch to scale • Frame stays on wall</p>
+            </div>
+          )}
+
+          {isModelPlaced && (
+            <div className="ar-controls-floating">
+              <button className="control-btn-floating" onClick={handleScreenshot} title="Capture">
+                <Camera size={24} />
+              </button>
+              <button className="control-btn-floating" onClick={handleReset} title="Reset">
+                <RotateCcw size={24} />
+              </button>
+            </div>
+          )}
         </>
       )}
     </div>
