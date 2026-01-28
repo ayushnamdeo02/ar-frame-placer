@@ -306,28 +306,26 @@ useFrame(() => {
 
   // Use world anchor position - NOT relative to camera
   const targetPos = worldAnchor.current.position.clone();
-  
-  // Device motion tracking is handled at camera level for now
-  // Future enhancement: Apply quaternion-based stabilization here
 
-    modelRef.current.position.copy(targetPos);
-    modelRef.current.quaternion.copy(worldAnchor.current.quaternion);
-    modelRef.current.scale.setScalar(worldAnchor.current.scale * modelSize);
+  modelRef.current.position.copy(targetPos);
+  modelRef.current.quaternion.copy(worldAnchor.current.quaternion);
+  modelRef.current.scale.setScalar(worldAnchor.current.scale * modelSize);
 
-    // Distance-based visibility
-    const distance = camera.position.distanceTo(targetPos);
-    modelRef.current.visible = distance > 0.2 && distance < 15;
+  // Distance-based visibility
+  const distance = camera.position.distanceTo(targetPos);
+  modelRef.current.visible = distance > 0.2 && distance < 15;
 
-    // Apply fog/fade based on distance for realism
-    modelRef.current.traverse((child) => {
-      if (child.isMesh && child.material) {
-        const opacity = distance < 1 ? distance : distance > 10 ? (15 - distance) / 5 : 1;
-        if (child.material.transparent !== undefined) {
-          child.material.opacity = Math.max(0, Math.min(1, opacity));
-        }
+  // Apply fog/fade based on distance for realism
+  modelRef.current.traverse((child) => {
+    if (child.isMesh && child.material) {
+      const opacity = distance < 1 ? distance : distance > 10 ? (15 - distance) / 5 : 1;
+      if (child.material.transparent !== undefined) {
+        child.material.opacity = Math.max(0, Math.min(1, opacity));
       }
-    });
+    }
   });
+});
+
 
   if (!gltf?.scene) {
     return (
