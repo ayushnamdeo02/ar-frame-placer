@@ -1,3 +1,4 @@
+/* eslint-disable no-unused-vars */
 /**
  * PROFESSIONAL AR VIEWER WITH ML/CV
  * - WebXR native AR capabilities
