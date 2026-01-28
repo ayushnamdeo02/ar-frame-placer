@@ -610,6 +610,8 @@ export default function AdvancedWebAR({ onClose }) {
    * Initialize ML/CV systems
    */
   useEffect(() => {
+    let detectionCleanup = null;
+    
     const initializeSystem = async () => {
       try {
         setStatus('loading');
@@ -640,8 +642,12 @@ export default function AdvancedWebAR({ onClose }) {
         setProgress(100);
         setStatus('ready');
         
-        // Start detection loop
-        startDetectionLoop();
+        console.log('✅ AR System ready - starting detection loop');
+        
+        // Start detection loop after a short delay to ensure video is playing
+        setTimeout(() => {
+          detectionCleanup = startDetectionLoop();
+        }, 500);
         
       } catch (error) {
         console.error('Initialization error:', error);
@@ -653,12 +659,17 @@ export default function AdvancedWebAR({ onClose }) {
     
     return () => {
       cleanup();
+      if (detectionCleanup) {
+        detectionCleanup();
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const startCamera = async () => {
     try {
+      console.log('📹 Requesting camera access...');
+      
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: 'environment',
@@ -668,14 +679,34 @@ export default function AdvancedWebAR({ onClose }) {
         }
       });
 
+      console.log('✅ Camera access granted');
+      console.log('Stream tracks:', stream.getTracks());
+      
       streamRef.current = stream;
+      
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        
+        // Wait for video to be ready
+        await new Promise((resolve, reject) => {
+          videoRef.current.onloadedmetadata = () => {
+            console.log('✅ Video metadata loaded');
+            console.log('Video dimensions:', videoRef.current.videoWidth, 'x', videoRef.current.videoHeight);
+            resolve();
+          };
+          
+          videoRef.current.onerror = (error) => {
+            console.error('❌ Video error:', error);
+            reject(error);
+          };
+        });
+        
         await videoRef.current.play();
+        console.log('✅ Video playing');
       }
       
     } catch (error) {
-      console.error('Camera error:', error);
+      console.error('❌ Camera error:', error);
       throw error;
     }
   };
@@ -683,10 +714,12 @@ export default function AdvancedWebAR({ onClose }) {
   /**
    * Detection loop - runs continuously
    */
-  const startDetectionLoop = () => {
+  const startDetectionLoop = useCallback(() => {
+    let animationFrameId = null;
+    
     const detect = async () => {
-      if (status !== 'ready' || !videoRef.current || isPlaced) {
-        requestAnimationFrame(detect);
+      if (!videoRef.current || isPlaced) {
+        animationFrameId = requestAnimationFrame(detect);
         return;
       }
 
@@ -695,13 +728,17 @@ export default function AdvancedWebAR({ onClose }) {
         const canvas = hiddenCanvasRef.current;
         
         if (!canvas || video.readyState !== video.HAVE_ENOUGH_DATA) {
-          requestAnimationFrame(detect);
+          animationFrameId = requestAnimationFrame(detect);
           return;
         }
 
         const ctx = canvas.getContext('2d');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+        
+        // Only set dimensions once or when they change
+        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+        }
         
         // Draw current frame
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -709,36 +746,46 @@ export default function AdvancedWebAR({ onClose }) {
         // Get image data
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         
-        // Detect planes using OpenCV
-        const planes = cvEngineRef.current.detectPlanes(
-          imageData,
-          canvas.width,
-          canvas.height
-        );
-        
-        setDetectedPlanes(planes);
-        
-        // Select best plane (highest confidence wall)
-        const bestPlane = planes.find(p => p.isWall && p.confidence > 0.6);
-        if (bestPlane) {
-          setSelectedPlane(bestPlane);
+        // Detect planes using OpenCV (only if engine is ready)
+        if (cvEngineRef.current && cvEngineRef.current.isReady) {
+          const planes = cvEngineRef.current.detectPlanes(
+            imageData,
+            canvas.width,
+            canvas.height
+          );
+          
+          setDetectedPlanes(planes);
+          
+          // Select best plane (highest confidence wall)
+          const bestPlane = planes.find(p => p.isWall && p.confidence > 0.6);
+          if (bestPlane) {
+            setSelectedPlane(bestPlane);
+          }
+          
+          // Extract features for SLAM
+          const features = cvEngineRef.current.extractFeatures(imageData);
+          
+          // Update SLAM pose
+          if (slamTrackerRef.current) {
+            slamTrackerRef.current.updatePose(features, Date.now());
+          }
         }
-        
-        // Extract features for SLAM
-        const features = cvEngineRef.current.extractFeatures(imageData);
-        
-        // Update SLAM pose
-        slamTrackerRef.current.updatePose(features, Date.now());
         
       } catch (error) {
         console.error('Detection error:', error);
       }
 
-      requestAnimationFrame(detect);
+      animationFrameId = requestAnimationFrame(detect);
     };
 
     detect();
-  };
+    
+    return () => {
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+      }
+    };
+  }, [isPlaced]);
 
   /**
    * Place model at detected plane
@@ -961,6 +1008,7 @@ export default function AdvancedWebAR({ onClose }) {
           color: white;
           padding: 2rem;
           text-align: center;
+          z-index: 10;
         }
 
         .spinner {
@@ -999,17 +1047,20 @@ export default function AdvancedWebAR({ onClose }) {
           width: 100%;
           height: 100%;
           object-fit: cover;
+          z-index: 1;
         }
 
         .ar-canvas {
           position: absolute;
           inset: 0;
+          z-index: 2;
           pointer-events: none;
         }
 
         .ar-ui {
           position: absolute;
           inset: 0;
+          z-index: 3;
           pointer-events: none;
         }
 
@@ -1031,6 +1082,11 @@ export default function AdvancedWebAR({ onClose }) {
           align-items: center;
           justify-content: center;
           cursor: pointer;
+          transition: background 0.2s;
+        }
+
+        .btn-close:hover {
+          background: rgba(0, 0, 0, 0.9);
         }
 
         .detection-status {
@@ -1045,6 +1101,7 @@ export default function AdvancedWebAR({ onClose }) {
           display: flex;
           align-items: center;
           gap: 0.75rem;
+          backdrop-filter: blur(10px);
         }
 
         .status-indicator {
@@ -1115,11 +1172,20 @@ export default function AdvancedWebAR({ onClose }) {
           cursor: pointer;
           box-shadow: 0 4px 20px rgba(0, 255, 0, 0.4);
           animation: pulse-btn 2s infinite;
+          transition: transform 0.2s, background 0.2s;
+        }
+
+        .btn-place:hover {
+          background: #00dd00;
+        }
+
+        .btn-place:active {
+          transform: translateX(-50%) scale(0.95);
         }
 
         @keyframes pulse-btn {
-          0%, 100% { transform: translateX(-50%) scale(1); }
-          50% { transform: translateX(-50%) scale(1.05); }
+          0%, 100% { box-shadow: 0 4px 20px rgba(0, 255, 0, 0.4); }
+          50% { box-shadow: 0 4px 30px rgba(0, 255, 0, 0.6); }
         }
 
         .placement-controls {
@@ -1142,12 +1208,22 @@ export default function AdvancedWebAR({ onClose }) {
           align-items: center;
           justify-content: center;
           cursor: pointer;
+          backdrop-filter: blur(10px);
+          transition: background 0.2s;
+        }
+
+        .btn-control:hover {
+          background: rgba(0, 0, 0, 0.9);
         }
 
         .btn-control.primary {
           width: 72px;
           height: 72px;
           background: #007AFF;
+        }
+
+        .btn-control.primary:hover {
+          background: #0066dd;
         }
 
         .btn-primary {
@@ -1159,6 +1235,11 @@ export default function AdvancedWebAR({ onClose }) {
           font-weight: 600;
           cursor: pointer;
           margin-top: 2rem;
+          transition: background 0.2s;
+        }
+
+        .btn-primary:hover {
+          background: #f0f0f0;
         }
       `}</style>
     );
