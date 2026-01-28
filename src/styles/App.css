@@ -1736,3 +1736,73 @@ a:hover {
     max-width: 260px;
   }
 }
+/* Enhanced metrics display */
+.detection-metrics {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 10px;
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 1;
+}
+
+.metric-label {
+  font-size: 0.625rem;
+  opacity: 0.6;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.metric-value {
+  font-size: 0.875rem;
+  font-weight: 700;
+  font-family: 'SF Mono', 'Monaco', monospace;
+}
+
+.sensor-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding: 0.5rem 1rem;
+  background: rgba(0, 255, 0, 0.1);
+  border: 1px solid rgba(0, 255, 0, 0.3);
+  border-radius: 8px;
+  font-size: 0.75rem;
+  color: #00ff00;
+}
+
+.sensor-indicator {
+  position: absolute;
+  top: 70px;
+  left: 1rem;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 255, 0, 0.2);
+  border: 1px solid rgba(0, 255, 0, 0.4);
+  border-radius: 50%;
+  color: #00ff00;
+  z-index: 5;
+  animation: pulse-sensor 2s infinite;
+}
+
+@keyframes pulse-sensor {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(1.1);
+  }
+}
